@@ -1,0 +1,12 @@
+# Build outputs
+*.elf
+*-linux
+/gen/
+/build/
+*.o
+*.a
+*.so
+*.dSYM/
+# Local SDK and test data
+/.env
+/tmp/
