@@ -1,4 +1,4 @@
-ifneq ($(filter-out linux linux-deps clean,$(MAKECMDGOALS)),)
+ifneq ($(filter-out linux linux-deps test-native clean,$(MAKECMDGOALS)),)
   ifdef PS5_PAYLOAD_SDK
     include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
   else
@@ -24,7 +24,7 @@ HOST_PKG_CONFIG ?= pkg-config
 
 BIN        := web-file-mgr.elf
 LINUX_BIN  := web-file-mgr-linux
-COMMON_SRCS := src/main.c src/websrv.c src/filemgr.c src/file_response.c src/task.c src/upload.c src/download.c src/text.c src/list.c src/space.c src/fs_util.c src/json_util.c src/path_util.c src/asset.c src/mime.c src/notify.c src/pkg_installer.c src/pkg_info.c
+COMMON_SRCS := src/main.c src/websrv.c src/filemgr.c src/file_response.c src/task.c src/upload.c src/download.c src/text.c src/list.c src/space.c src/fs_util.c src/json_util.c src/path_util.c src/asset.c src/mime.c src/notify.c src/pkg_installer.c src/pkg_info.c src/mkpfs_native.c
 PS5_SRCS    := $(COMMON_SRCS) src/app_installer.c
 LINUX_SRCS  := $(COMMON_SRCS)
 BASE_ASSETS := $(filter-out %.dds,$(wildcard assets/*))
@@ -44,11 +44,14 @@ LINUX_CFLAGS := -O2 -flto -Wall -Werror -Isrc -DVERSION_TAG=\"$(VERSION_TAG)\" -
 LINUX_CFLAGS += `$(HOST_PKG_CONFIG) libmicrohttpd --cflags`
 LINUX_LDADD := `$(HOST_PKG_CONFIG) libmicrohttpd --libs` -pthread
 
-.PHONY: all linux deps linux-deps clean
+.PHONY: all linux test-native deps linux-deps clean
 
 all: deps $(BIN)
 
 linux: linux-deps $(LINUX_BIN)
+
+test-native: tests/test_mkpfs_native
+	./tests/test_mkpfs_native
 
 deps:
 	@$(PKG_CONFIG) --exists libmicrohttpd || ./install-libmicrohttpd.sh
@@ -61,7 +64,7 @@ gen:
 	mkdir gen
 
 clean:
-	rm -rf $(BIN) $(LINUX_BIN) gen
+	rm -rf $(BIN) $(LINUX_BIN) tests/test_mkpfs_native gen
 
 gen/%.c: assets/% gen-asset-module.py | gen
 	$(PYTHON) gen-asset-module.py --path $* $< > $@
@@ -73,3 +76,6 @@ $(BIN): $(PS5_SRCS) $(GEN_SRCS)
 $(LINUX_BIN): $(LINUX_SRCS) $(GEN_SRCS)
 	$(HOST_CC) $(LINUX_CFLAGS) -o $@ $^ $(LINUX_LDADD)
 	$(HOST_STRIP) $@
+
+tests/test_mkpfs_native: tests/test_mkpfs_native.c src/mkpfs_native.c src/mkpfs_native.h
+	$(HOST_CC) $(LINUX_CFLAGS) -o $@ tests/test_mkpfs_native.c src/mkpfs_native.c

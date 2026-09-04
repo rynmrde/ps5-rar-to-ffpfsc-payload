@@ -1,0 +1,13 @@
+name: Linux tests
+on:
+  push:
+  pull_request:
+jobs:
+  native-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install libmicrohttpd headers
+        run: sudo apt-get update && sudo apt-get install -y libmicrohttpd-dev
+      - name: Run native regression tests
+        run: make test-native
