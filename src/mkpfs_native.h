@@ -25,16 +25,29 @@ typedef struct mkpfs_native_options {
   int verify_structure;
 } mkpfs_native_options_t;
 
-/* Normalizes an absolute PS5 path and rejects traversal or malformed input. */
-int mkpfs_normalize_path(const char *input, char *output, size_t output_size);
+typedef int (*mkpfs_progress_callback)(uint64_t done, uint64_t total,
+                                        const char *phase,
+                                        const char *current, void *opaque);
 
-/* Bounded-memory recursive scan used by the web UI and conversion preflight. */
+int mkpfs_normalize_path(const char *input, char *output, size_t output_size);
 int mkpfs_scan_folder(const char *root, mkpfs_scan_result_t *result);
 
-/*
- * Deliberately returns ENOTSUP until the complete MkPFS on-disk writer is
- * ported. It must never create a file that merely has a .ffpfsc suffix.
- */
+/* Pack an already-built logical PFS image into the upstream PFSC container. */
+int mkpfs_pack_pfsc_file(const char *input_path, const char *output_path,
+                         int compression_level, volatile int *cancel_requested,
+                         mkpfs_progress_callback progress, void *opaque);
+
+/* Verify PFSC header, offset table, zlib blocks, and logical size. */
+int mkpfs_verify_pfsc_file(const char *path, uint64_t *logical_size,
+                           uint64_t *block_count);
+
+/* Build the upstream-compatible four-inode PFS wrapper around a raw exFAT file. */
+int mkpfs_wrap_exfat_file(const char *exfat_path, const char *output_path,
+                          const char *inner_name, int compression_level,
+                          volatile int *cancel_requested,
+                          mkpfs_progress_callback progress, void *opaque);
+
+/* Folder-to-PFS conversion remains guarded until the full PFS writer is linked. */
 int mkpfs_convert_folder(const char *source, const char *destination,
                          const char *output_name,
                          const mkpfs_native_options_t *options,

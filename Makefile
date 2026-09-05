@@ -1,4 +1,4 @@
-ifneq ($(filter-out linux linux-deps test-native clean,$(MAKECMDGOALS)),)
+ifneq ($(filter-out linux linux-deps test-native mkpfs-pfsc mkpfs-wrap-exfat clean,$(MAKECMDGOALS)),)
   ifdef PS5_PAYLOAD_SDK
     include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
   else
@@ -39,12 +39,12 @@ CFLAGS := -Oz -fno-asynchronous-unwind-tables -fno-unwind-tables -Wall -Werror -
 CFLAGS += `$(PKG_CONFIG) libmicrohttpd --cflags`
 LDFLAGS := -Wl,--gc-sections
 LDADD  := `$(PKG_CONFIG) libmicrohttpd --libs`
-LDADD  += -lSceIpmi -lSceAppInstUtil -lSceUserService
+LDADD  += -lSceIpmi -lSceAppInstUtil -lSceUserService -lz
 LINUX_CFLAGS := -O2 -flto -Wall -Werror -Isrc -DVERSION_TAG=\"$(VERSION_TAG)\" -DTITLE_ID=\"$(TITLE_ID)\"
 LINUX_CFLAGS += `$(HOST_PKG_CONFIG) libmicrohttpd --cflags`
-LINUX_LDADD := `$(HOST_PKG_CONFIG) libmicrohttpd --libs` -pthread
+LINUX_LDADD := `$(HOST_PKG_CONFIG) libmicrohttpd --libs` -pthread -lz
 
-.PHONY: all linux test-native deps linux-deps clean
+.PHONY: all linux test-native mkpfs-pfsc mkpfs-wrap-exfat deps linux-deps clean
 
 all: deps $(BIN)
 
@@ -52,6 +52,10 @@ linux: linux-deps $(LINUX_BIN)
 
 test-native: tests/test_mkpfs_native
 	./tests/test_mkpfs_native
+
+mkpfs-pfsc: tools/mkpfs-pfsc
+
+mkpfs-wrap-exfat: tools/mkpfs-wrap-exfat
 
 deps:
 	@$(PKG_CONFIG) --exists libmicrohttpd || ./install-libmicrohttpd.sh
@@ -64,7 +68,7 @@ gen:
 	mkdir gen
 
 clean:
-	rm -rf $(BIN) $(LINUX_BIN) tests/test_mkpfs_native gen
+	rm -rf $(BIN) $(LINUX_BIN) tests/test_mkpfs_native tools/mkpfs-pfsc tools/mkpfs-wrap-exfat gen
 
 gen/%.c: assets/% gen-asset-module.py | gen
 	$(PYTHON) gen-asset-module.py --path $* $< > $@
@@ -78,4 +82,10 @@ $(LINUX_BIN): $(LINUX_SRCS) $(GEN_SRCS)
 	$(HOST_STRIP) $@
 
 tests/test_mkpfs_native: tests/test_mkpfs_native.c src/mkpfs_native.c src/mkpfs_native.h
-	$(HOST_CC) -O2 -Wall -Werror -Isrc -o $@ tests/test_mkpfs_native.c src/mkpfs_native.c
+	$(HOST_CC) -O2 -Wall -Werror -Isrc -o $@ tests/test_mkpfs_native.c src/mkpfs_native.c -lz
+
+tools/mkpfs-pfsc: tools/mkpfs-pfsc.c src/mkpfs_native.c src/mkpfs_native.h
+	$(HOST_CC) -O2 -Wall -Werror -Isrc -o $@ tools/mkpfs-pfsc.c src/mkpfs_native.c -lz
+
+tools/mkpfs-wrap-exfat: tools/mkpfs-wrap-exfat.c src/mkpfs_native.c src/mkpfs_native.h
+	$(HOST_CC) -O2 -Wall -Werror -Isrc -o $@ tools/mkpfs-wrap-exfat.c src/mkpfs_native.c -lz

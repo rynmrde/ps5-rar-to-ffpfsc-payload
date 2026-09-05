@@ -1,38 +1,54 @@
-# MkPFS for PS5
+# MkPFS PS5
 
-This repository is a dedicated integration project based on [PSBrew/MkPFS](https://github.com/PSBrew/MkPFS) and [owendswang/ps5-web-file-manager](https://github.com/owendswang/ps5-web-file-manager). It preserves the Web File Manager's native PS5 payload, embedded HTTP server, file browser, background file tasks, launcher installation reference, and responsive web assets, and adds a portable native foundation for path validation and source-folder scanning.
+This repository is a dedicated integration project based on [PSBrew/MkPFS](https://github.com/PSBrew/MkPFS) and [owendswang/ps5-web-file-manager](https://github.com/owendswang/ps5-web-file-manager). It preserves the Web File Manager payload, embedded HTTP server, file browser, background file tasks, responsive assets, and PS5 launcher reference while adding a native C implementation of the verified PFSC stream and the four-inode PS5 PFS wrapper used by the upstream exFAT workflow.
 
-## Important status
+## Current implementation status
 
-The complete MkPFS writer is **not yet ported to native C/C++** in this revision. The native conversion entry point intentionally returns `ENOTSUP` rather than producing a file with a misleading `.ffpfsc` suffix. The project therefore does **not** claim to generate compatible `.ffpfsc` files, does **not** claim to provide a production-ready converter, and does **not** claim PS5 runtime testing. This is an explicit safety boundary required by the original MkPFS format and by the requirement never to report success without real conversion and verification.
+The native code now performs real upstream-compatible PFSC block encoding and verification. It uses the MkPFS PFSC header layout `<iiiiqqQq`, 64 KiB logical blocks, zlib streams, raw-block fallback when compression is not beneficial, monotonic block-offset tables, cancellation checks, progress callbacks, temporary output files, and atomic rename. The native PFSC output has been decoded successfully by the upstream MkPFS `decode_pfsc_payload` implementation.
 
-The remaining work is to port the actual MkPFS PFS/exFAT serialization, compression, checksums, optional encryption/signature paths, and verification logic from the GPL-3.0-or-later Python implementation into the native payload. The existing scanner and configuration types are deliberately small, bounded-memory, and independent of Python, shell commands, or Linux utilities.
+The native code also builds the upstream-compatible four-inode PFS wrapper around a prepared raw exFAT image. The resulting wrapper was checked by the upstream MkPFS verifier with zero warnings and zero errors, reporting four inodes, one directory, one compressed file, the expected 512 KiB logical payload, and a valid data CRC and manifest.
 
-## Current build targets
+The remaining boundary is the folder-to-exFAT serializer. `mkpfs_convert_folder` still returns `ENOTSUP` rather than pretending that a directory has been converted. The native wrapper can already consume an exFAT input, but the native folder scanner, exFAT allocator, boot-region serializer, FAT, allocation bitmap, up-case table, directory-entry generator, and streamed file-data emitter still need to be completed before the end-to-end folder conversion is production-ready.
 
-The upstream file manager supports the same SDK convention as the reference project:
+## Host build and verification
+
+Host-only targets do not require the PS5 SDK:
+
+```sh
+make test-native
+make mkpfs-pfsc
+make mkpfs-wrap-exfat
+```
+
+`make linux` builds the Linux file-manager payload and links the native PFSC implementation with zlib. The utility targets are useful for reproducible compatibility checks:
+
+```sh
+./tools/mkpfs-pfsc INPUT_PFS OUTPUT.ffpfsc 7
+./tools/mkpfs-wrap-exfat INPUT.exfat OUTPUT.ffpfsc TITLEID.exfat
+```
+
+The upstream Python MkPFS verifier can validate the wrapped result:
+
+```sh
+python3 -m mkpfs verify OUTPUT.ffpfsc
+```
+
+The current native regression suite covers absolute-path normalization, traversal rejection, bounded folder scanning, native PFSC creation, upstream-compatible PFSC structural verification, corruption detection, cancellation-safe temporary cleanup, and the guarded folder-conversion boundary.
+
+## PS5 build status
+
+The project keeps the reference PS5 SDK convention:
 
 ```sh
 export PS5_PAYLOAD_SDK=/path/to/ps5-payload-sdk
 make
 ```
 
-The Linux-side target builds the payload's file-management code and the portable native foundation for local testing:
-
-```sh
-make linux
-make test-native
-```
-
-A PS5 ELF cannot be built or tested in this environment because `PS5_PAYLOAD_SDK` and the Prospero toolchain are not installed. No claim of PS5 execution is made.
+A public Prospero SDK checkout was inspected during this work. In the current sandbox its wrapper scripts and target sysroot were incomplete for this project: the wrapper required an additional host compiler path and the target sysroot lacked headers needed by the inherited file manager. Consequently, no PS5 ELF is claimed as successfully built or runtime-tested in this revision.
 
 ## Preserved file-manager features
 
-The inherited payload provides browsing and sorting, copy, move, delete, rename, folder creation, text editing, multi-selection, upload and download, background task progress, cancellation, responsive English/Chinese UI, embedded assets, startup notifications, and the reference Home Screen launcher flow. The existing payload listens on port `8888` by default and attempts the next available port when needed. The PS5 ELF is normally delivered through an ELF loader listening on port `9021`; the actual HTTP port is shown by the startup notification.
-
-## Planned native conversion architecture
-
-The conversion job will scan and validate the source, check destination capacity, write only to a temporary output, stream file data with bounded buffers, report progress through the existing thread-safe task model, run MkPFS verification and structure verification, atomically rename the final image, and remove temporary data on cancellation or failure. The final implementation must be wired to conversion API routes only after those steps are implemented and tested against MkPFS fixtures.
+The inherited payload provides browsing and sorting, copy, move, delete, rename, folder creation, text editing, multi-selection, upload and download, background progress, cancellation, responsive English/Chinese UI, embedded assets, startup notifications, and the reference Home Screen launcher flow. The HTTP server listens on port `8888` by default and attempts the next available port when needed.
 
 ## Attribution and licensing
 
