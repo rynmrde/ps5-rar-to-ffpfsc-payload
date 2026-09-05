@@ -1,4 +1,4 @@
-ifneq ($(filter-out linux linux-deps test-native mkpfs-pfsc mkpfs-wrap-exfat clean,$(MAKECMDGOALS)),)
+ifneq ($(filter-out linux linux-deps test-native mkpfs-pfsc mkpfs-wrap-exfat mkpfs-exfat mkpfs-convert-folder compat-upstream clean,$(MAKECMDGOALS)),)
   ifdef PS5_PAYLOAD_SDK
     include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
   else
@@ -44,7 +44,7 @@ LINUX_CFLAGS := -O2 -flto -Wall -Werror -Isrc -DVERSION_TAG=\"$(VERSION_TAG)\" -
 LINUX_CFLAGS += `$(HOST_PKG_CONFIG) libmicrohttpd --cflags`
 LINUX_LDADD := `$(HOST_PKG_CONFIG) libmicrohttpd --libs` -pthread -lz
 
-.PHONY: all linux test-native mkpfs-pfsc mkpfs-wrap-exfat deps linux-deps clean
+.PHONY: all linux test-native mkpfs-pfsc mkpfs-wrap-exfat mkpfs-exfat mkpfs-convert-folder compat-upstream deps linux-deps clean
 
 all: deps $(BIN)
 
@@ -57,6 +57,10 @@ mkpfs-pfsc: tools/mkpfs-pfsc
 
 mkpfs-wrap-exfat: tools/mkpfs-wrap-exfat
 
+mkpfs-exfat: tools/mkpfs-exfat
+
+mkpfs-convert-folder: tools/mkpfs-convert-folder
+
 deps:
 	@$(PKG_CONFIG) --exists libmicrohttpd || ./install-libmicrohttpd.sh
 
@@ -68,7 +72,7 @@ gen:
 	mkdir gen
 
 clean:
-	rm -rf $(BIN) $(LINUX_BIN) tests/test_mkpfs_native tools/mkpfs-pfsc tools/mkpfs-wrap-exfat gen
+	rm -rf $(BIN) $(LINUX_BIN) tests/test_mkpfs_native tools/mkpfs-pfsc tools/mkpfs-wrap-exfat tools/mkpfs-exfat tools/mkpfs-convert-folder gen
 
 gen/%.c: assets/% gen-asset-module.py | gen
 	$(PYTHON) gen-asset-module.py --path $* $< > $@
@@ -89,3 +93,12 @@ tools/mkpfs-pfsc: tools/mkpfs-pfsc.c src/mkpfs_native.c src/mkpfs_native.h
 
 tools/mkpfs-wrap-exfat: tools/mkpfs-wrap-exfat.c src/mkpfs_native.c src/mkpfs_native.h
 	$(HOST_CC) -O2 -Wall -Werror -Isrc -o $@ tools/mkpfs-wrap-exfat.c src/mkpfs_native.c -lz
+
+tools/mkpfs-exfat: tools/mkpfs-exfat.c src/mkpfs_native.c src/mkpfs_native.h
+	$(HOST_CC) -O2 -Wall -Werror -Isrc -o $@ tools/mkpfs-exfat.c src/mkpfs_native.c -lz
+
+tools/mkpfs-convert-folder: tools/mkpfs-convert-folder.c src/mkpfs_native.c src/mkpfs_native.h
+	$(HOST_CC) -O2 -Wall -Werror -Isrc -o $@ tools/mkpfs-convert-folder.c src/mkpfs_native.c -lz
+
+compat-upstream: mkpfs-convert-folder
+	./tests/test_folder_compat.sh

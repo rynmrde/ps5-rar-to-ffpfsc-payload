@@ -21,6 +21,7 @@
 #endif
 
 #include "filemgr_internal.h"
+#include "mkpfs_native.h"
 #include "json_util.h"
 #include "path_util.h"
 #include "pkg_info.h"
@@ -1627,6 +1628,29 @@ task_request_error(struct MHD_Connection *conn, file_task_t *task,
   return send_json_error(conn, status, msg);
 }
 
+typedef struct conversion_progress_ctx {
+  file_task_t *task;
+  unsigned long long total;
+  unsigned long long last;
+} conversion_progress_ctx_t;
+
+static int conversion_progress(uint64_t done, uint64_t phase_total, const char *phase, const char *current, void *opaque) {
+  conversion_progress_ctx_t *ctx = opaque;
+  unsigned long long half = ctx->total / 2;
+  unsigned long long target;
+  if (!phase_total) phase_total = 1;
+  if (phase && !strcmp(phase, "exfat")) target = (unsigned long long)(((long double)done * (long double)half) / (long double)phase_total);
+  else target = half + (unsigned long long)(((long double)done * (long double)(ctx->total - half)) / (long double)phase_total);
+  if (target > ctx->total) target = ctx->total;
+  if (target > ctx->last) {
+    task_update(ctx->task, TASK_RUNNING, current ? current : phase, target - ctx->last, NULL);
+    ctx->last = target;
+  } else if (current) {
+    task_update(ctx->task, TASK_RUNNING, current, 0, NULL);
+  }
+  return task_cancel_requested(ctx->task);
+}
+
 static void *
 task_worker(void *arg) {
   file_task_t *task = arg;
@@ -1639,6 +1663,28 @@ task_worker(void *arg) {
   if(task_cancel_requested(task)) {
     task_update(task, TASK_CANCELED, task->src, 0, "canceled");
     return NULL;
+  }
+  if(task->op == TASK_CONVERT) {
+    mkpfs_scan_result_t scan;
+    mkpfs_native_options_t options = {0};
+    conversion_progress_ctx_t progress = {.task = task};
+    char output_dir[PATH_MAX];
+    char *output_name;
+    snprintf(output_dir, sizeof(output_dir), "%s", task->dst);
+    output_name = strrchr(output_dir, '/');
+    if (output_name) { *output_name++ = 0; } else { output_name = output_dir; snprintf(output_dir, sizeof(output_dir), "."); }
+    if (mkpfs_scan_folder(task->srcs[0], &scan)) {
+      ret = errno ? errno : EIO;
+    } else {
+      progress.total = scan.total_bytes ? scan.total_bytes * 2 + 1 : 1;
+      task_set_total(task, progress.total);
+      options.compression_level = task->compression_level <= 9 ? task->compression_level : 7;
+      options.compression = 1; options.verify = 1; options.verify_structure = 1;
+      task_update(task, TASK_RUNNING, "native conversion", 0, NULL);
+      ret = mkpfs_convert_folder_progress(task->srcs[0], output_dir, output_name,
+                                           &options, &task->cancel_requested,
+                                           conversion_progress, &progress);
+    }
   }
   if(task->op == TASK_COPY || task->op == TASK_MOVE) {
     char error[160] = {0};
@@ -1779,6 +1825,7 @@ task_worker(void *arg) {
   }
 
   if(ret) {
+    errno = ret;
     if(errno == ECANCELED || task_cancel_requested(task)) {
       task_update(task, TASK_CANCELED, task->current[0] ? task->current : task->src,
                   0, "canceled");
@@ -1793,6 +1840,7 @@ task_worker(void *arg) {
   } else {
     time_t completed_at = time(NULL);
     pthread_mutex_lock(&g_tasks_lock);
+    if (task->op == TASK_CONVERT) snprintf(task->current, sizeof(task->current), "%s", task->dst);
     task->state = TASK_DONE;
     if(task->total) {
       task->done = task->total;
@@ -1887,6 +1935,49 @@ create_task_response(struct MHD_Connection *conn, task_op_t op,
 
   strbuf_printf(&b, "{\"ok\":true,\"task_id\":%lu}", task->id);
   return send_buffer(conn, MHD_HTTP_OK, b.data, "application/json");
+}
+
+static enum MHD_Result
+api_convert(struct MHD_Connection *conn) {
+  char *source = fs_path_value(query_value(conn, "source"));
+  char *destination = fs_path_value(query_value(conn, "destination"));
+  char *name = fs_path_value(query_value(conn, "name"));
+  char *profile = query_value(conn, "profile");
+  struct stat source_st, destination_st;
+  mkpfs_scan_result_t scan;
+  unsigned long level = profile ? strtoul(profile, NULL, 10) : 7;
+  unsigned long long available = 0;
+  file_task_t *task = NULL;
+  strbuf_t b = {0};
+  char **srcs = NULL;
+  char output[PATH_MAX];
+  int rc = MHD_HTTP_BAD_REQUEST;
+
+  if (!source || !destination || !name || !*name || strchr(name, '/') || strchr(name, '\\') || level > 9 || stat(source, &source_st) || !S_ISDIR(source_st.st_mode) || stat(destination, &destination_st) || !S_ISDIR(destination_st.st_mode)) {
+    rc = MHD_HTTP_BAD_REQUEST; goto convert_error;
+  }
+  if (mkpfs_scan_folder(source, &scan)) { rc = MHD_HTTP_BAD_REQUEST; goto convert_error; }
+  unsigned long long required_space = scan.total_bytes > ULLONG_MAX - 64ULL * 1024ULL * 1024ULL ? ULLONG_MAX : scan.total_bytes + 64ULL * 1024ULL * 1024ULL;
+  if (target_available_space(destination, &available) || available < required_space) {
+    rc = MHD_HTTP_INSUFFICIENT_STORAGE; goto convert_error;
+  }
+  if (snprintf(output, sizeof(output), "%s/%s", destination, name) >= (int)sizeof(output)) { rc = MHD_HTTP_BAD_REQUEST; goto convert_error; }
+  srcs = calloc(1, sizeof(*srcs)); task = calloc(1, sizeof(*task));
+  if (!srcs || !task) { rc = MHD_HTTP_INTERNAL_SERVER_ERROR; goto convert_error; }
+  srcs[0] = source; source = NULL; task->srcs = srcs; srcs = NULL; task->src_count = 1;
+  task->op = TASK_CONVERT; task->state = TASK_QUEUED; task->compression_level = (unsigned int)level;
+  snprintf(task->src, sizeof(task->src), "%s", task->srcs[0]); snprintf(task->dst, sizeof(task->dst), "%s", output); snprintf(task->conversion_name, sizeof(task->conversion_name), "%s", name);
+  task->created_at = task->updated_at = time(NULL);
+  pthread_mutex_lock(&g_tasks_lock);
+  remove_finished_tasks_locked();
+  if (has_active_task_locked()) { pthread_mutex_unlock(&g_tasks_lock); rc = MHD_HTTP_CONFLICT; goto convert_error; }
+  task->id = g_next_task_id++; task->next = g_tasks; g_tasks = task; pthread_mutex_unlock(&g_tasks_lock);
+  if (pthread_create(&task->thread, NULL, task_worker, task)) { task_update(task, TASK_FAILED, NULL, 0, "pthread_create failed"); } else pthread_detach(task->thread);
+  strbuf_printf(&b, "{\"ok\":true,\"task_id\":%lu}", task->id);
+  free(destination); free(name); free(profile); return send_buffer(conn, MHD_HTTP_OK, b.data, "application/json");
+convert_error:
+  free(source); free(destination); free(name); free(profile); free(srcs); if (task) { free(task->srcs); free(task); }
+  return send_json_error(conn, rc, rc == MHD_HTTP_INSUFFICIENT_STORAGE ? "insufficient storage" : "invalid conversion request");
 }
 
 static enum MHD_Result
@@ -2396,6 +2487,9 @@ filemgr_api_request(struct MHD_Connection *conn, const char *url,
                     const char *method, const char *body, size_t body_size) {
   if(!strcmp(url, "/api/list")) return api_list(conn);
   if(!strcmp(url, "/api/tasks")) return api_tasks(conn);
+  if(!strcmp(url, "/api/convert")) {
+    return strcmp(method, MHD_HTTP_METHOD_POST) ? send_json_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED, "invalid method") : api_convert(conn);
+  }
   if(!strcmp(url, "/api/space")) return api_space(conn);
   if(!strcmp(url, "/api/cancel")) return api_cancel(conn);
   if(!strcmp(url, "/api/exit")) return api_exit(conn);

@@ -23,6 +23,7 @@ task_op_name(task_op_t op) {
   case TASK_CHMOD: return "chmod";
   case TASK_DOWNLOAD: return "download";
   case TASK_UPLOAD: return "upload";
+  case TASK_CONVERT: return "convert";
   case TASK_PKG_INSTALL: return "pkg_install";
   default: return "unknown";
   }

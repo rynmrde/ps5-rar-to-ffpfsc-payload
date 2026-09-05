@@ -47,7 +47,18 @@ int mkpfs_wrap_exfat_file(const char *exfat_path, const char *output_path,
                           volatile int *cancel_requested,
                           mkpfs_progress_callback progress, void *opaque);
 
-/* Folder-to-PFS conversion remains guarded until the full PFS writer is linked. */
+int mkpfs_build_exfat_folder(const char *source, const char *output_path,
+                              volatile int *cancel_requested,
+                              mkpfs_progress_callback progress,
+                              void *opaque);
+
+int mkpfs_convert_folder_progress(const char *source, const char *destination,
+                                    const char *output_name,
+                                    const mkpfs_native_options_t *options,
+                                    volatile int *cancel_requested,
+                                    mkpfs_progress_callback progress,
+                                    void *opaque);
+
 int mkpfs_convert_folder(const char *source, const char *destination,
                          const char *output_name,
                          const mkpfs_native_options_t *options,

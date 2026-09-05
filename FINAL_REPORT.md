@@ -2,66 +2,70 @@
 
 ## Outcome
 
-The dedicated repository is [rynmrde/mkpfs-ps5](https://github.com/rynmrde/mkpfs-ps5). The latest implementation commit is `51648f7`, titled `Implement native PFSC encoder and PFS wrapper`.
+The repository now contains the complete host-tested native pipeline:
 
-This revision preserves the upstream GPLv3-or-later Web File Manager base and adds a real native PFSC encoder and verifier, a native four-inode PFS wrapper around a prepared exFAT image, host utilities, regression coverage, compatibility documentation, and updated build instructions.
+> **folder → exFAT → four-inode PFS → PFSC → `.ffpfsc`**
 
-The complete requested folder-to-`.ffpfsc` workflow is **not yet complete**. The native `mkpfs_convert_folder` entry point remains guarded with `ENOTSUP`, so the project does not claim that an arbitrary source directory can already be converted on PS5. It also does not claim a PS5 ELF or runtime verification.
+The previously verified PFSC and PFS stages were preserved. The missing native exFAT serializer is now implemented with deterministic upstream-compatible layout, bounded directory buffers, 1 MiB streamed file I/O, nested directory recursion, exact up-case table bytes and checksum, title-ID-derived embedded naming, cancellation checks, temporary output, and atomic rename.
+
+The existing Web File Manager now exposes a **Convert folder** action and `/api/convert`. The action validates the selected folder, destination, output filename, compression level, and target storage; queues a background conversion task; reports progress through the existing task API and overlay; supports cancellation; and reports the final atomic output path in task history.
 
 ## Repository status
 
 | Item | Verified value |
 |---|---|
 | Repository | [https://github.com/rynmrde/mkpfs-ps5](https://github.com/rynmrde/mkpfs-ps5) |
-| Branch | `main` |
-| Latest commit | `51648f7` — `Implement native PFSC encoder and PFS wrapper` |
-| Existing release | [v0.1.0-alpha](https://github.com/rynmrde/mkpfs-ps5/releases/tag/v0.1.0-alpha) |
-| Native PFSC output | Implemented and verified against upstream decoder |
-| Native four-inode PFS wrapper | Implemented and verified by upstream MkPFS verifier |
-| Folder-to-exFAT serializer | Not yet implemented; conversion remains guarded |
-| PS5 ELF | Not produced or runtime-tested |
+| Starting commit | `5ba07a1` |
+| Final commit | To be recorded after final audit and push |
+| Release/tag | To be updated after final audit and push |
+| Host PFSC/PFS behavior | Preserved and passing prior compatibility checks |
+| Native folder-to-exFAT | Implemented and upstream-verified |
+| Web conversion task/API/UI | Implemented and Linux smoke-tested |
+| PS5 ELF | Not built; target sysroot blocker documented below |
 
-## Verified build and compatibility results
+## Tests and upstream verification
 
-The following commands passed in the sandbox:
+The clean host matrix passed:
 
 ```sh
-make test-native
+make test-native mkpfs-pfsc mkpfs-wrap-exfat mkpfs-exfat mkpfs-convert-folder
+MKPFS_UPSTREAM_ROOT=/home/ubuntu/work/MkPFS make compat-upstream
 make linux
-make mkpfs-pfsc mkpfs-wrap-exfat
 ```
 
-A native-generated PFSC payload was decoded by the upstream MkPFS `decode_pfsc_payload` implementation and reproduced all `589824` source bytes. A native-generated four-inode wrapper around an upstream-generated exFAT fixture was checked by the upstream MkPFS verifier with zero warnings and zero errors. The verifier reported four inodes, one directory, one compressed file, 524288 logical bytes, CRC32 `0xEB87F8DD`, and manifest SHA-256 `54e2a33b28fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+The real-folder compatibility test creates `sce_sys/param.json`, `eboot.bin`, and a nested `sce_sys/subdir/readme.txt`. The generated `.ffpfsc` was accepted by the upstream MkPFS verifier with **Warnings: 0** and **Errors: 0**. Upstream tree inspection of the native raw exFAT stage showed:
 
-The native PFSC path uses the upstream `<iiiiqqQq` header layout, 64 KiB logical blocks, zlib streams, raw-block fallback, monotonic offset tables, bounded streaming buffers, cancellation checks, progress callbacks, temporary output files, atomic rename, and structural verification.
+```text
+/
+|-- sce_sys
+|   |-- subdir
+|   |   `-- readme.txt
+|   `-- param.json
+`-- eboot.bin
+```
 
-## Host utilities
+The HTTP application smoke test successfully queued `/api/convert`, reached task state `done`, created the requested `.ffpfsc`, and passed the same upstream verifier with zero warnings and zero errors.
 
-The repository now provides these host-side utilities:
+## Benchmark
+
+A sparse 256 MiB folder fixture completed on the sandbox host in **1.334770 seconds**, producing an 813,428-byte `.ffpfsc`. The upstream verifier returned exit code 0 and reported approximately 490.77 MiB/s verification throughput. This is a host smoke benchmark, not a PS5 benchmark or a 50–100 GiB endurance result. The implementation’s directory and file-data paths are bounded and streaming, but large-volume target measurements require suitable storage and a real target environment.
+
+## PS5 ELF status and blocker
+
+The public Prospero SDK checkout was attempted with:
 
 ```sh
-./tools/mkpfs-pfsc INPUT_PFS OUTPUT.ffpfsc 7
-./tools/mkpfs-wrap-exfat INPUT.exfat OUTPUT.ffpfsc TITLEID.exfat
+PS5_PAYLOAD_SDK=/home/ubuntu/work/ps5-sdk/host make
 ```
 
-The resulting wrapper can be checked with the upstream MkPFS checkout using:
+The build stopped while compiling the target-side libmicrohttpd dependency because the Prospero compiler could not create target executables. A direct native-source probe failed with:
 
-```sh
-python3 -m mkpfs verify OUTPUT.ffpfsc
+```text
+fatal error: 'ctype.h' file not found
 ```
 
-The wrapper consumes a prepared raw exFAT image. It does not yet generate that exFAT image from an arbitrary folder in native code.
+The SDK target sysroot is incomplete. No PS5 ELF is claimed, and no PS5 runtime test is claimed. This is the only known release blocker after the host application and upstream format verification passed.
 
-## Remaining work
+## Licensing
 
-The main unimplemented component is the native folder-to-exFAT serializer and its integration with the existing file-manager task/API/UI workflow. That work includes the native directory-tree allocator, exFAT boot regions, FAT, allocation bitmap, up-case table, directory entry sets, streamed file payloads, title-ID naming, conversion-task progress and cancellation, and end-to-end fixture testing from a source folder through a PS5-compatible `.ffpfsc` image.
-
-The public Prospero SDK repository was inspected during the work, but the available checkout was incomplete for this build: the wrapper required additional host compiler setup and the target sysroot lacked headers needed by the inherited file manager. Therefore no PS5 ELF is claimed.
-
-## Preserved application features
-
-The inherited payload still provides browsing and sorting, copy, move, delete, rename, folder creation, text editing, multi-selection, upload and download, background task progress, cancellation, responsive English/Chinese UI, embedded assets, startup notifications, and the reference Home Screen launcher flow.
-
-## Licensing and attribution
-
-The project remains GPLv3-or-later. MkPFS is GPLv3-or-later, and libmicrohttpd is LGPL. The original notices and third-party attribution are preserved in `LICENSE` and `THIRD_PARTY_NOTICES.md`.
+The repository remains GPLv3-or-later. MkPFS is GPLv3-or-later and libmicrohttpd is LGPL. Original notices and third-party attribution are preserved in `LICENSE` and `THIRD_PARTY_NOTICES.md`.

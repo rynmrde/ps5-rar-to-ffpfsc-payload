@@ -82,6 +82,7 @@ const textEditorStatusEl = document.getElementById("textEditorStatus");
 const textEditorCloseBtn = document.getElementById("textEditorCloseBtn");
 const textEditorSaveBtn = document.getElementById("textEditorSaveBtn");
 const newTextBtn = document.getElementById("newTextBtn");
+const convertBtn = document.getElementById("convertBtn");
 const imagePreviewOverlayEl = document.getElementById("imagePreviewOverlay");
 const imagePreviewNameEl = document.getElementById("imagePreviewName");
 const imagePreviewEl = document.getElementById("imagePreview");
@@ -1294,6 +1295,10 @@ function updateButtons() {
   uploadFolderBtn.disabled = locked;
   document.getElementById("mkdirBtn").disabled = locked;
   newTextBtn.disabled = locked;
+  if (convertBtn) {
+    const convertItems = selectedEntries();
+    convertBtn.disabled = locked || convertItems.length !== 1 || convertItems[0].type !== "d";
+  }
   for (const button of filesEl.querySelectorAll(".row-action, .mode-action")) button.disabled = locked;
   for (const checkbox of filesEl.querySelectorAll(".select-cell input")) checkbox.disabled = locked;
   selectAllEl.disabled = locked;
@@ -2226,6 +2231,26 @@ function actionExit() {
 }
 
 document.getElementById("refreshBtn").addEventListener("click", () => load(cwd, false));
+async function actionConvertFolder() {
+  if (busy || loadingPath) return;
+  const items = selectedEntries();
+  if (items.length !== 1 || items[0].type !== "d") return;
+  let name = (prompt(t("convertNamePrompt"), items[0].name + ".ffpfsc") || "").trim();
+  if (!name) return;
+  if (!/\.ffpfsc$/i.test(name)) name += ".ffpfsc";
+  let profile = (prompt(t("convertProfilePrompt"), "7") || "7").trim();
+  if (!/^[0-9]$/.test(profile)) profile = "7";
+  try {
+    const data = await api("/api/convert", { source: items[0].path, destination: cwd, name, profile });
+    trackTask(data.task_id, "convert", true);
+    setStatus(t("convertStarted"));
+    await pollTasks();
+  } catch (err) {
+    setBusy(false);
+    showActionFailed(t("convertFolder"), err.message);
+  }
+}
+
 document.getElementById("mkdirBtn").addEventListener("click", () => {
   if (busy || loadingPath) return;
   const path = cwd;
@@ -2251,6 +2276,7 @@ parentBtn.addEventListener("click", actionParentDirectory);
 textEditorCloseBtn.addEventListener("click", requestCloseTextEditor);
 textEditorSaveBtn.addEventListener("click", saveTextEditor);
 newTextBtn.addEventListener("click", actionNewText);
+if (convertBtn) convertBtn.addEventListener("click", actionConvertFolder);
 imagePreviewCloseBtn.addEventListener("click", closeImagePreview);
 pkgInfoCloseBtn.addEventListener("click", closePkgInfo);
 pkgInfoInstallBtn.addEventListener("click", installPkgFromInfo);
