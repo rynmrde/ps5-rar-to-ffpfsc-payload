@@ -102,6 +102,7 @@ main(int argc, char **argv) {
 #ifdef __SCE__
   unsigned short notified_port = 0;
   int install_launcher = argc > 1 && !strcmp(argv[1], "--install-launcher");
+  int launcher_attempted = 0;
 #endif
 
 #ifdef __SCE__
@@ -116,9 +117,6 @@ main(int argc, char **argv) {
   }
 
 #ifdef __SCE__
-  if(install_launcher && app_install_if_needed()) {
-    fputs("launcher installation failed\n", stderr);
-  }
 #else
   (void)argc;
   (void)argv;
@@ -135,6 +133,14 @@ main(int argc, char **argv) {
       continue;
     }
 
+#ifdef __SCE__
+    if(install_launcher && !launcher_attempted) {
+      launcher_attempted = 1;
+      if(app_install_if_needed(port)) {
+        fputs("launcher installation failed\n", stderr);
+      }
+    }
+#endif
     printf("listening on port %u\n", port);
 #ifdef __SCE__
     if(notified_port != port) {

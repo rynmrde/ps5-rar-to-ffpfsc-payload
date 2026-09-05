@@ -71,9 +71,20 @@ the browser can attach it to API requests. Static assets remain readable, but
 filesystem and task APIs reject requests without the token. The server limits
 connections, per-peer connections, request body size, and idle connection time.
 
-Normal startup does **not** install or update the Home Screen launcher. That
-operation writes under `/user/app` and calls the PS5 application-install API,
-so it is now explicitly opt-in with `--install-launcher`. Conversion rejects
+Normal startup does **not** install or update the Home Screen launcher. To
+install or refresh the managed `FMGR88888` shortcut, load the ELF with the
+exact argument `--install-launcher`; installation happens after the payload
+selects its listen port, so the generated deeplink uses the current port. An
+existing launcher with another title ID is never overwritten. For loaders
+that support arguments, use:
+```text
+mkpfs-ps5-web-file-mgr.elf --install-launcher
+```
+The operation writes under `/user/app` and calls the PS5 application-install
+API, so it remains explicitly opt-in. The `/api/roots` diagnostic endpoint
+reports which of `/`, `/user/app`, `/data`, `/mnt`, USB, and extended-storage
+paths are readable; the UI uses it only when the root listing is empty to find
+a usable mounted storage root. Conversion rejects
 symlinked sources, traversal components, case-folding collisions, oversized
 metadata allocations, and implicit replacement of an existing output file.
 

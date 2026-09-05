@@ -2566,6 +2566,7 @@ filemgr_api_request(struct MHD_Connection *conn, const char *url,
     return send_json_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED, "invalid method");
   }
   if(!strcmp(url, "/api/list")) return api_list(conn);
+  if(!strcmp(url, "/api/roots")) return api_roots(conn);
   if(!strcmp(url, "/api/tasks")) return api_tasks(conn);
   if(!strcmp(url, "/api/convert")) {
     return strcmp(method, MHD_HTTP_METHOD_POST) ? send_json_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED, "invalid method") : api_convert(conn);

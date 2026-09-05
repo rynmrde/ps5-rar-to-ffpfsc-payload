@@ -98,6 +98,7 @@ enum MHD_Result send_json_error_detail(struct MHD_Connection *conn,
                                        const char *code, const char *arg);
 enum MHD_Result send_buffer(struct MHD_Connection *conn, unsigned int status,
                             char *data, const char *mime);
+enum MHD_Result api_roots(struct MHD_Connection *conn);
 
 int ensure_parent_dirs(const char *base, const char *rel);
 int chmod_path_mode(const char *path, unsigned int mode);

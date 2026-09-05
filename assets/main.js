@@ -1568,7 +1568,21 @@ async function load(path, scrollTop, force, alertOnError, historyMode) {
   startContentLoadingTimer();
   try {
     setStatus(t("readDir"));
-    const data = await api("/api/list", { path });
+    let data = await api("/api/list", { path });
+    if (path === "/" && (!data.entries || !data.entries.length)) {
+      const roots = await api("/api/roots");
+      for (const root of roots.roots || []) {
+        if (root === "/") continue;
+        try {
+          const candidate = await api("/api/list", { path: root });
+          if (candidate.entries && candidate.entries.length) {
+            data = candidate;
+            break;
+          }
+        } catch (err) {
+        }
+      }
+    }
     if (contentLoadingEl.hidden && data.entries && data.entries.length > 80) {
       await showContentLoadingAfterDelay();
     }

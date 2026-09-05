@@ -1,6 +1,7 @@
 #include "filemgr_internal.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +44,7 @@ api_list(struct MHD_Connection *conn) {
     }
   }
   if(!(dir = opendir(path))) {
+    fprintf(stderr, "api_list: opendir(%s) failed errno=%d\n", path, errno);
     free(path);
     return send_json_error(conn, MHD_HTTP_NOT_FOUND, NULL);
   }
@@ -82,7 +84,36 @@ api_list(struct MHD_Connection *conn) {
   }
 
   closedir(dir);
+  fprintf(stderr, "api_list: path=%s entries=%s\n", path, first ? "0" : ">0");
   free(path);
+  strbuf_append(&b, "]}");
+  return send_buffer(conn, MHD_HTTP_OK, b.data, "application/json");
+}
+
+enum MHD_Result
+api_roots(struct MHD_Connection *conn) {
+  static const char *const candidates[] = {
+    "/", "/user/app", "/data", "/mnt", "/mnt/usb0", "/mnt/usb1",
+    "/mnt/usb2", "/mnt/usb3", "/mnt/usb4", "/mnt/usb5", "/mnt/usb6",
+    "/mnt/usb7", "/mnt/ext0", "/mnt/ext1"
+  };
+  strbuf_t b = {0};
+  int first = 1;
+
+  strbuf_append(&b, "{\"ok\":true,\"roots\":[");
+  for(size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+    DIR *dir = opendir(candidates[i]);
+    if(!dir) {
+      fprintf(stderr, "api_roots: unreadable path=%s errno=%d\n",
+              candidates[i], errno);
+      continue;
+    }
+    closedir(dir);
+    fprintf(stderr, "api_roots: readable path=%s\n", candidates[i]);
+    if(!first) strbuf_append(&b, ",");
+    first = 0;
+    json_escape(&b, candidates[i]);
+  }
   strbuf_append(&b, "]}");
   return send_buffer(conn, MHD_HTTP_OK, b.data, "application/json");
 }
