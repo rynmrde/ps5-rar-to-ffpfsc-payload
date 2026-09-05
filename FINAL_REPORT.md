@@ -16,8 +16,8 @@ The existing Web File Manager now exposes a **Convert folder** action and `/api/
 |---|---|
 | Repository | [https://github.com/rynmrde/mkpfs-ps5](https://github.com/rynmrde/mkpfs-ps5) |
 | Starting commit | `5ba07a1` |
-| Final commit | To be recorded after final audit and push |
-| Release/tag | To be updated after final audit and push |
+| Final commit | `989ce34` — `Complete native folder conversion pipeline` |
+| Release/tag | `v0.2.0-alpha` prerelease, pending remote creation |
 | Host PFSC/PFS behavior | Preserved and passing prior compatibility checks |
 | Native folder-to-exFAT | Implemented and upstream-verified |
 | Web conversion task/API/UI | Implemented and Linux smoke-tested |
