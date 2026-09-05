@@ -63,6 +63,20 @@ make
 
 The original checkout was source-only and lacked `target/include` and `target/lib`; its `include/freebsd/ctype.h` was therefore outside the wrapper’s expected sysroot. The documented SDK install generated the target headers, CRT objects, linker scripts, libc, pthread library, and SCE stub libraries. Target zlib 1.3.1 and libmicrohttpd were then built into the target homebrew prefix. The resulting `web-file-mgr.elf` is a stripped x86-64 PS5 payload ELF with no unresolved symbols and the expected `.sprx` dependencies. It is packaged in the `v0.2.0-alpha.2` prerelease.
 
+## Safety-sensitive runtime behavior
+
+The HTTP API requires a fresh per-launch access token. The startup notification
+shows the token; open the browser UI using `http://PS5-IP:PORT/#token=TOKEN` so
+the browser can attach it to API requests. Static assets remain readable, but
+filesystem and task APIs reject requests without the token. The server limits
+connections, per-peer connections, request body size, and idle connection time.
+
+Normal startup does **not** install or update the Home Screen launcher. That
+operation writes under `/user/app` and calls the PS5 application-install API,
+so it is now explicitly opt-in with `--install-launcher`. Conversion rejects
+symlinked sources, traversal components, case-folding collisions, oversized
+metadata allocations, and implicit replacement of an existing output file.
+
 ## Licensing
 
 The project remains GPLv3-or-later. MkPFS is GPLv3-or-later, and libmicrohttpd is LGPL. Original notices and third-party attribution are preserved in [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

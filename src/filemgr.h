@@ -12,3 +12,4 @@ int filemgr_upload_data(void *upload_ctx, const char *data, size_t size);
 enum MHD_Result filemgr_upload_finish(struct MHD_Connection *conn,
                                       void *upload_ctx);
 void filemgr_upload_free(void *upload_ctx);
+void filemgr_cancel_and_wait_for_tasks(void);

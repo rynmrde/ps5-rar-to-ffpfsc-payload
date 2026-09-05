@@ -33,7 +33,7 @@ file_close(void *cls) {
 
 enum MHD_Result
 filemgr_fs_request(struct MHD_Connection *conn) {
-  char *path = fs_path_value(query_value(conn, "path"));
+  char *path = absolute_path_value(query_value(conn, "path"));
   struct MHD_Response *resp;
   enum MHD_Result ret = MHD_NO;
   struct stat st;

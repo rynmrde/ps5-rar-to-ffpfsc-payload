@@ -1493,10 +1493,27 @@ resolve_destination(const char *src, const char *dst, char *out, size_t size) {
 }
 
 static int
+canonical_target_path(const char *path, char *out, size_t out_size) {
+  char parent[PATH_MAX];
+  char resolved_parent[PATH_MAX];
+
+  if(realpath(path, out)) {
+    return 0;
+  }
+  if(errno != ENOENT || path_dirname(path, parent, sizeof(parent)) ||
+     !realpath(parent, resolved_parent)) {
+    return -1;
+  }
+  return path_join(out, out_size, resolved_parent, path_basename(path));
+}
+
+static int
 validate_task_target(const char *src, const char *target, int overwrite,
                      char *error, size_t error_size) {
   struct stat src_st;
   struct stat target_st;
+  char canonical_src[PATH_MAX];
+  char canonical_target[PATH_MAX];
 
   if(!strcmp(src, target)) {
     snprintf(error, error_size, "source and destination are the same");
@@ -1508,13 +1525,20 @@ validate_task_target(const char *src, const char *target, int overwrite,
     return -1;
   }
   if(S_ISDIR(src_st.st_mode)) {
-    size_t src_len = strlen(src);
+    size_t src_len;
 
-    while(src_len > 1 && src[src_len - 1] == '/') {
+    if(!realpath(src, canonical_src) ||
+       canonical_target_path(target, canonical_target,
+                             sizeof(canonical_target))) {
+      snprintf(error, error_size, "cannot canonicalize source or destination");
+      return -1;
+    }
+    src_len = strlen(canonical_src);
+    while(src_len > 1 && canonical_src[src_len - 1] == '/') {
       src_len--;
     }
-    if(!strncmp(src, target, src_len) &&
-       (target[src_len] == 0 || target[src_len] == '/')) {
+    if(!strncmp(canonical_src, canonical_target, src_len) &&
+       (canonical_target[src_len] == 0 || canonical_target[src_len] == '/')) {
       snprintf(error, error_size, "destination is inside source directory");
       errno = EINVAL;
       return -1;
@@ -1867,6 +1891,7 @@ create_task_response(struct MHD_Connection *conn, task_op_t op,
     free_paths(srcs, src_count);
     return send_json_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "out of memory");
   }
+  atomic_init(&task->cancel_requested, 0);
   if(!src_count) {
     return task_request_error(conn, task, srcs, src_count,
                               MHD_HTTP_BAD_REQUEST, "no source paths");
@@ -1882,9 +1907,22 @@ create_task_response(struct MHD_Connection *conn, task_op_t op,
     for(i = 0; i < src_count; i++) {
       char target[PATH_MAX];
       char error[128] = {0};
+      size_t j;
       if(request_target_path(srcs[i], dst, src_count, target, sizeof(target))) {
         return task_request_error(conn, task, srcs, src_count,
                                   MHD_HTTP_BAD_REQUEST, NULL);
+      }
+      for(j = 0; j < i; j++) {
+        char previous_target[PATH_MAX];
+        if(request_target_path(srcs[j], dst, src_count, previous_target,
+                               sizeof(previous_target))) {
+          return task_request_error(conn, task, srcs, src_count,
+                                    MHD_HTTP_BAD_REQUEST, NULL);
+        }
+        if(!strcmp(target, previous_target)) {
+          return task_request_error(conn, task, srcs, src_count,
+                                    MHD_HTTP_CONFLICT, "destination exists");
+        }
       }
       if(validate_task_target(srcs[i], target, overwrite, error, sizeof(error))) {
         return task_request_error(conn, task, srcs, src_count,
@@ -1940,8 +1978,8 @@ create_task_response(struct MHD_Connection *conn, task_op_t op,
 
 static enum MHD_Result
 api_convert(struct MHD_Connection *conn) {
-  char *source = fs_path_value(query_value(conn, "source"));
-  char *destination = fs_path_value(query_value(conn, "destination"));
+  char *source = absolute_path_value(query_value(conn, "source"));
+  char *destination = absolute_path_value(query_value(conn, "destination"));
   char *name = fs_path_value(query_value(conn, "name"));
   char *profile = query_value(conn, "profile");
   char *workers_param = query_value(conn, "workers");
@@ -1957,7 +1995,7 @@ api_convert(struct MHD_Connection *conn) {
   char output[PATH_MAX];
   int rc = MHD_HTTP_BAD_REQUEST;
 
-  if (!source || !destination || !name || !*name || strchr(name, '/') || strchr(name, '\\') || level > 9 || workers > 8 || (workers_param && strcasecmp(workers_param, "auto") && workers == 0) || stat(source, &source_st) || !S_ISDIR(source_st.st_mode) || stat(destination, &destination_st) || !S_ISDIR(destination_st.st_mode)) {
+  if (!source || !destination || !name || !relative_path_safe(name) || level > 9 || workers > 8 || (workers_param && strcasecmp(workers_param, "auto") && workers == 0) || stat(source, &source_st) || !S_ISDIR(source_st.st_mode) || stat(destination, &destination_st) || !S_ISDIR(destination_st.st_mode)) {
     rc = MHD_HTTP_BAD_REQUEST; goto convert_error;
   }
   if (mkpfs_scan_folder(source, &scan)) { rc = MHD_HTTP_BAD_REQUEST; goto convert_error; }
@@ -1968,6 +2006,7 @@ api_convert(struct MHD_Connection *conn) {
   if (snprintf(output, sizeof(output), "%s/%s", destination, name) >= (int)sizeof(output)) { rc = MHD_HTTP_BAD_REQUEST; goto convert_error; }
   srcs = calloc(1, sizeof(*srcs)); task = calloc(1, sizeof(*task));
   if (!srcs || !task) { rc = MHD_HTTP_INTERNAL_SERVER_ERROR; goto convert_error; }
+  atomic_init(&task->cancel_requested, 0);
   srcs[0] = source; source = NULL; task->srcs = srcs; srcs = NULL; task->src_count = 1;
   task->op = TASK_CONVERT; task->state = TASK_QUEUED; task->compression_level = (unsigned int)level; task->conversion_workers = (unsigned int)workers;
   snprintf(task->src, sizeof(task->src), "%s", task->srcs[0]); snprintf(task->dst, sizeof(task->dst), "%s", output); snprintf(task->conversion_name, sizeof(task->conversion_name), "%s", name);
@@ -2015,7 +2054,7 @@ api_tasks(struct MHD_Connection *conn) {
     strbuf_printf(&b, ",\"src_count\":%zu,\"completed_count\":%zu,\"total\":%llu,\"done\":%llu,\"speed\":%llu,\"eta\":%llu,\"cancel_requested\":%s,\"created_at\":%lld,\"elapsed\":%lld,\"total_elapsed\":%lld,\"updated_at\":%lld}",
                   task->src_count, task->upload_completed,
                   task->total, task->done, task->speed, task->eta,
-                  task->cancel_requested ? "true" : "false",
+                  atomic_load_explicit(&task->cancel_requested, memory_order_acquire) ? "true" : "false",
                   (long long)task->created_at,
                   task->transfer_started_at ? (long long)(now - task->transfer_started_at) : 0LL,
                   task->created_at ? (long long)(now - task->created_at) : 0LL,
@@ -2051,7 +2090,7 @@ api_cancel(struct MHD_Connection *conn) {
   pthread_mutex_lock(&g_tasks_lock);
   for(task = g_tasks; task; task = task->next) {
     if(task->id == id && task->op != TASK_PKG_INSTALL && task_is_active(task)) {
-      task->cancel_requested = 1;
+      atomic_store_explicit(&task->cancel_requested, 1, memory_order_release);
       if(task->op == TASK_DOWNLOAD && task->state == TASK_QUEUED) {
         task->state = TASK_CANCELED;
         snprintf(task->error, sizeof(task->error), "canceled");
@@ -2067,6 +2106,30 @@ api_cancel(struct MHD_Connection *conn) {
                  send_json_error(conn, MHD_HTTP_NOT_FOUND, "active task not found");
 }
 
+void
+filemgr_cancel_and_wait_for_tasks(void) {
+  for(;;) {
+    file_task_t *task;
+    int active = 0;
+
+    pthread_mutex_lock(&g_tasks_lock);
+    for(task = g_tasks; task; task = task->next) {
+      if(task_is_active(task)) {
+        atomic_store_explicit(&task->cancel_requested, 1, memory_order_release);
+        if(task->op == TASK_PKG_INSTALL && task->state == TASK_QUEUED) {
+          task->state = TASK_CANCELED;
+          snprintf(task->error, sizeof(task->error), "canceled");
+        } else {
+          active = 1;
+        }
+      }
+    }
+    pthread_mutex_unlock(&g_tasks_lock);
+    if(!active) return;
+    usleep(10000);
+  }
+}
+
 static void *
 stop_websrv_later(void *arg) {
   (void)arg;
@@ -2076,6 +2139,7 @@ stop_websrv_later(void *arg) {
   /* Keep this process alive while ShellUI handles the asynchronous URI. */
   usleep(1000000);
 #endif
+  filemgr_cancel_and_wait_for_tasks();
   websrv_stop();
   return NULL;
 }
@@ -2093,7 +2157,7 @@ api_exit(struct MHD_Connection *conn) {
 static enum MHD_Result
 api_copy(struct MHD_Connection *conn, const char *body, size_t body_size) {
   char *paths_raw = body_form_value(body, body_size, "paths");
-  char *dst = fs_path_value(body_form_value(body, body_size, "dst"));
+  char *dst = absolute_path_value(body_form_value(body, body_size, "dst"));
   char *overwrite = body_form_value(body, body_size, "overwrite");
   char **paths = NULL;
   size_t count = 0;
@@ -2120,7 +2184,7 @@ api_copy(struct MHD_Connection *conn, const char *body, size_t body_size) {
 static enum MHD_Result
 api_move(struct MHD_Connection *conn, const char *body, size_t body_size) {
   char *paths_raw = body_form_value(body, body_size, "paths");
-  char *dst = fs_path_value(body_form_value(body, body_size, "dst"));
+  char *dst = absolute_path_value(body_form_value(body, body_size, "dst"));
   char *overwrite = body_form_value(body, body_size, "overwrite");
   char **paths = NULL;
   size_t count = 0;
@@ -2160,7 +2224,7 @@ api_delete(struct MHD_Connection *conn, const char *body, size_t body_size) {
 
 static enum MHD_Result
 api_rename(struct MHD_Connection *conn) {
-  char *path = fs_path_value(query_value(conn, "path"));
+  char *path = absolute_path_value(query_value(conn, "path"));
   char *name = fs_path_value(query_value(conn, "name"));
   char parent[PATH_MAX];
   char target[PATH_MAX];
@@ -2188,7 +2252,7 @@ api_rename(struct MHD_Connection *conn) {
 
 static enum MHD_Result
 api_mkdir(struct MHD_Connection *conn) {
-  char *path = fs_path_value(query_value(conn, "path"));
+  char *path = absolute_path_value(query_value(conn, "path"));
   char *name = fs_path_value(query_value(conn, "name"));
   char target[PATH_MAX];
   int ret;
@@ -2386,6 +2450,7 @@ enqueue_pkg_tasks(char **paths, size_t count, unsigned long *ids) {
       result = -1;
       goto done;
     }
+    atomic_init(&task->cancel_requested, 0);
     task->op = TASK_PKG_INSTALL;
     task->state = TASK_QUEUED;
     task->src_count = 1;
@@ -2489,6 +2554,17 @@ api_install_pkg(struct MHD_Connection *conn, const char *body,
 enum MHD_Result
 filemgr_api_request(struct MHD_Connection *conn, const char *url,
                     const char *method, const char *body, size_t body_size) {
+  if((!strcmp(url, "/api/convert") || !strcmp(url, "/api/cancel") ||
+      !strcmp(url, "/api/exit") || !strcmp(url, "/api/copy") ||
+      !strcmp(url, "/api/move") || !strcmp(url, "/api/delete") ||
+      !strcmp(url, "/api/upload/prepare") ||
+      !strcmp(url, "/api/upload/finish") || !strcmp(url, "/api/rename") ||
+      !strcmp(url, "/api/mkdir") || !strcmp(url, "/api/chmod") ||
+      !strcmp(url, "/api/install-pkg") ||
+      !strcmp(url, "/api/text/create") || !strcmp(url, "/api/text/save")) &&
+     strcmp(method, MHD_HTTP_METHOD_POST)) {
+    return send_json_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED, "invalid method");
+  }
   if(!strcmp(url, "/api/list")) return api_list(conn);
   if(!strcmp(url, "/api/tasks")) return api_tasks(conn);
   if(!strcmp(url, "/api/convert")) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdatomic.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -35,10 +36,10 @@ int mkpfs_scan_folder(const char *root, mkpfs_scan_result_t *result);
 /* Pack an already-built logical PFS image into the upstream PFSC container. */
 int mkpfs_pack_pfsc_file_ex(const char *input_path, const char *output_path,
                             int compression_level, unsigned int workers,
-                            volatile int *cancel_requested,
+                            const atomic_int *cancel_requested,
                             mkpfs_progress_callback progress, void *opaque);
 int mkpfs_pack_pfsc_file(const char *input_path, const char *output_path,
-                         int compression_level, volatile int *cancel_requested,
+                         int compression_level, const atomic_int *cancel_requested,
                          mkpfs_progress_callback progress, void *opaque);
 
 /* Verify PFSC header, offset table, zlib blocks, and logical size. */
@@ -49,29 +50,29 @@ int mkpfs_verify_pfsc_file(const char *path, uint64_t *logical_size,
 int mkpfs_wrap_exfat_file_ex(const char *exfat_path, const char *output_path,
                              const char *inner_name, int compression_level,
                              unsigned int workers,
-                             volatile int *cancel_requested,
+                             const atomic_int *cancel_requested,
                              mkpfs_progress_callback progress, void *opaque);
 int mkpfs_wrap_exfat_file(const char *exfat_path, const char *output_path,
                           const char *inner_name, int compression_level,
-                          volatile int *cancel_requested,
+                          const atomic_int *cancel_requested,
                           mkpfs_progress_callback progress, void *opaque);
 
 int mkpfs_build_exfat_folder(const char *source, const char *output_path,
-                              volatile int *cancel_requested,
+                              const atomic_int *cancel_requested,
                               mkpfs_progress_callback progress,
                               void *opaque);
 
 int mkpfs_convert_folder_progress(const char *source, const char *destination,
                                     const char *output_name,
                                     const mkpfs_native_options_t *options,
-                                    volatile int *cancel_requested,
+                                    const atomic_int *cancel_requested,
                                     mkpfs_progress_callback progress,
                                     void *opaque);
 
 int mkpfs_convert_folder(const char *source, const char *destination,
                          const char *output_name,
                          const mkpfs_native_options_t *options,
-                         volatile int *cancel_requested);
+                         const atomic_int *cancel_requested);
 
 #ifdef __cplusplus
 }

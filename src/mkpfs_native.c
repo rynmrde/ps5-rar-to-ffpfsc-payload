@@ -5,11 +5,13 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <zlib.h>
@@ -21,6 +23,14 @@
 #define PFSC_HEADER_SIZE 0x30u
 #define PFSC_OFFSETS_OFFSET 0x400u
 #define PFSC_INITIAL_DATA_OFFSET 0x10000u
+#define PFSC_MAX_OFFSETS_BYTES (64u * 1024u * 1024u)
+#define EXFAT_MAX_TREE_NODES 262144u
+#define EXFAT_MAX_TREE_DEPTH 128u
+
+static int cancellation_requested(const atomic_int *cancel_requested) {
+  return cancel_requested && atomic_load_explicit(cancel_requested,
+                                                   memory_order_acquire);
+}
 
 static uint64_t align_up_u64(uint64_t value, uint64_t alignment) {
   return (value + alignment - 1) / alignment * alignment;
@@ -114,10 +124,34 @@ static int write_zeros(FILE *out, uint64_t count) {
 }
 
 static int cleanup_pack(FILE *in, FILE *out, const char *temp_path, int error) {
-  if (in) fclose(in);
-  if (out) fclose(out);
+  if (in) (void)fclose(in);
+  if (out) (void)fclose(out);
   if (temp_path) unlink(temp_path);
   return error;
+}
+
+static int open_secure_temp_file(const char *output_path, const char *label,
+                                 char *temp_path, size_t temp_path_size,
+                                 FILE **out) {
+  int fd;
+  int n;
+  struct stat st;
+
+  if (!output_path || !label || !temp_path || !out) return EINVAL;
+  if (!lstat(output_path, &st)) return EEXIST;
+  if (errno != ENOENT) return errno;
+  n = snprintf(temp_path, temp_path_size, "%s.%s.XXXXXX", output_path, label);
+  if (n < 0 || (size_t)n >= temp_path_size) return ENAMETOOLONG;
+  fd = mkstemp(temp_path);
+  if (fd < 0) return errno;
+  *out = fdopen(fd, "wb+");
+  if (!*out) {
+    int error = errno;
+    close(fd);
+    unlink(temp_path);
+    return error;
+  }
+  return 0;
 }
 
 typedef struct pfsc_slot {
@@ -143,7 +177,7 @@ typedef struct pfsc_pool {
   pfsc_slot_t *slots;
   int compression_level;
   int input_fd;
-  volatile int *cancel_requested;
+  const atomic_int *cancel_requested;
 } pfsc_pool_t;
 
 static void *pfsc_worker(void *opaque) {
@@ -158,7 +192,7 @@ static void *pfsc_worker(void *opaque) {
       pthread_cond_wait(&pool->work, &pool->lock);
     }
     pthread_mutex_unlock(&pool->lock);
-    if (pool->cancel_requested && *pool->cancel_requested) {
+    if (cancellation_requested(pool->cancel_requested)) {
       pthread_mutex_lock(&pool->lock);     slot->error = ECANCELED; slot->claimed = 0; slot->done = 1; pthread_cond_broadcast(&pool->result); pthread_mutex_unlock(&pool->lock); continue;
     }
     uLongf size = compressBound(PFSC_BLOCK_SIZE);
@@ -182,21 +216,23 @@ static int pfsc_auto_workers(void) {
 
 int mkpfs_pack_pfsc_file_ex(const char *input_path, const char *output_path,
                             int compression_level, unsigned int requested_workers,
-                            volatile int *cancel_requested,
+                            const atomic_int *cancel_requested,
                             mkpfs_progress_callback progress, void *opaque) {
   struct stat st; FILE *in = NULL, *out = NULL; char temp_path[PATH_MAX];
   uint64_t *offsets = NULL; uint64_t logical_size, block_count, offsets_bytes, data_offset, stored_pos; int rc = 0;
   pfsc_pool_t pool = {0}; pthread_t *threads = NULL; int threads_started = 0;
+  int pool_initialized = 0;
   if (!input_path || !output_path || stat(input_path, &st) != 0) return errno;
   if (!S_ISREG(st.st_mode) || compression_level < 0 || compression_level > 9) return EINVAL;
   logical_size = align_up_u64((uint64_t)st.st_size, PFSC_BLOCK_SIZE); if (!logical_size) logical_size = PFSC_BLOCK_SIZE;
   block_count = logical_size / PFSC_BLOCK_SIZE;
   if (block_count > (SIZE_MAX / sizeof(*offsets)) - 1) return EOVERFLOW;
   offsets_bytes = (block_count + 1) * sizeof(*offsets);
+  if (offsets_bytes > PFSC_MAX_OFFSETS_BYTES) return EFBIG;
   data_offset = align_up_u64(PFSC_OFFSETS_OFFSET + offsets_bytes, PFSC_INITIAL_DATA_OFFSET);
-  if (snprintf(temp_path, sizeof(temp_path), "%s.tmp.%ld", output_path, (long)getpid()) >= (int)sizeof(temp_path)) return ENAMETOOLONG;
   in = fopen(input_path, "rb"); if (!in) return errno;
-  out = fopen(temp_path, "wb+"); if (!out) return cleanup_pack(in, NULL, temp_path, errno);
+  rc = open_secure_temp_file(output_path, "pfsc", temp_path, sizeof(temp_path), &out);
+  if (rc) return cleanup_pack(in, NULL, NULL, rc);
   offsets = (uint64_t *)calloc((size_t)(block_count + 1), sizeof(*offsets));
   if (!offsets) return cleanup_pack(in, out, temp_path, ENOMEM);
   unsigned char header[PFSC_HEADER_SIZE] = {0};
@@ -205,7 +241,11 @@ int mkpfs_pack_pfsc_file_ex(const char *input_path, const char *output_path,
   pool.count = requested_workers ? (requested_workers > 8 ? 8 : (int)requested_workers) : pfsc_auto_workers();
   if (pool.count < 1) pool.count = 1;
   pool.compression_level = compression_level; pool.cancel_requested = cancel_requested; pool.input_fd = fileno(in);
-  pthread_mutex_init(&pool.lock, NULL); pthread_cond_init(&pool.work, NULL); pthread_cond_init(&pool.result, NULL);
+  if (pthread_mutex_init(&pool.lock, NULL) || pthread_cond_init(&pool.work, NULL) || pthread_cond_init(&pool.result, NULL)) {
+    rc = EAGAIN;
+    goto failed;
+  }
+  pool_initialized = 1;
   pool.slots = (pfsc_slot_t *)calloc((size_t)pool.count, sizeof(*pool.slots)); threads = (pthread_t *)calloc((size_t)pool.count, sizeof(*threads));
   if (!pool.slots || !threads) { rc = ENOMEM; goto failed_pool; }
   for (int i = 0; i < pool.count; i++) {
@@ -226,11 +266,11 @@ int mkpfs_pack_pfsc_file_ex(const char *input_path, const char *output_path,
       slot->index = next_dispatch; slot->compressed_size = 0; slot->error = 0; slot->claimed = 0; slot->done = 0; slot->pending = 1; next_dispatch++;
       pthread_cond_signal(&pool.work); pthread_mutex_unlock(&pool.lock);
     }
-    if (cancel_requested && *cancel_requested) { rc = ECANCELED; goto failed_pool; }
+    if (cancellation_requested(cancel_requested)) { rc = ECANCELED; goto failed_pool; }
     pfsc_slot_t *slot = &pool.slots[next_write % (uint64_t)pool.count];
     pthread_mutex_lock(&pool.lock);
-    while (!slot->done && !(cancel_requested && *cancel_requested)) pthread_cond_wait(&pool.result, &pool.lock);
-    if (cancel_requested && *cancel_requested) { pthread_mutex_unlock(&pool.lock); rc = ECANCELED; goto failed_pool; }
+    while (!slot->done && !cancellation_requested(cancel_requested)) pthread_cond_wait(&pool.result, &pool.lock);
+    if (cancellation_requested(cancel_requested)) { pthread_mutex_unlock(&pool.lock); rc = ECANCELED; goto failed_pool; }
     rc = slot->error; pthread_mutex_unlock(&pool.lock); if (rc) goto failed_pool;
     offsets[next_write] = stored_pos;
     if (slot->compressed_size < PFSC_BLOCK_SIZE) { rc = write_all(out, slot->compressed, slot->compressed_size); stored_pos += slot->compressed_size; }
@@ -246,12 +286,13 @@ int mkpfs_pack_pfsc_file_ex(const char *input_path, const char *output_path,
   offsets[block_count] = stored_pos;
   if (fseeko(out, (off_t)PFSC_OFFSETS_OFFSET, SEEK_SET) != 0) { rc = EIO; goto failed_pool; }
   for (uint64_t i = 0; i <= block_count; i++) { unsigned char b[8]; put_u64le(b, offsets[i]); if (write_all(out, b, 8)) { rc = EIO; goto failed_pool; } }
-  if (fflush(out) != 0) { rc = EIO; goto failed_pool; }
-  fclose(in); fclose(out); in = out = NULL;
+  if (fflush(out) != 0 || fsync(fileno(out)) != 0) { rc = EIO; goto failed_pool; }
+  if (fclose(in) != 0 || fclose(out) != 0) { in = out = NULL; rc = EIO; goto failed_pool; }
+  in = out = NULL;
   if (rename(temp_path, output_path) != 0) { rc = errno; unlink(temp_path); goto done_pool; }
   rc = 0; goto done_pool;
 failed_pool:
-  pthread_mutex_lock(&pool.lock); pool.stopping = 1; pthread_cond_broadcast(&pool.work); pthread_cond_broadcast(&pool.result); pthread_mutex_unlock(&pool.lock);
+  if (pool_initialized) { pthread_mutex_lock(&pool.lock); pool.stopping = 1; pthread_cond_broadcast(&pool.work); pthread_cond_broadcast(&pool.result); pthread_mutex_unlock(&pool.lock); }
   for (int i = 0; i < threads_started; i++) pthread_join(threads[i], NULL);
   threads_started = 0;
   if (in || out) { cleanup_pack(in, out, temp_path, rc ? rc : EIO); }
@@ -262,11 +303,11 @@ failed:
 done_pool:
   if (pool.slots) for (int i = 0; i < pool.count; i++) { free(pool.slots[i].raw); free(pool.slots[i].compressed); }
   free(pool.slots); free(threads); free(offsets);
-  pthread_cond_destroy(&pool.work); pthread_cond_destroy(&pool.result); pthread_mutex_destroy(&pool.lock);
+  if (pool_initialized) { pthread_cond_destroy(&pool.work); pthread_cond_destroy(&pool.result); pthread_mutex_destroy(&pool.lock); }
   return rc;
 }
 
-int mkpfs_pack_pfsc_file(const char *input_path, const char *output_path, int compression_level, volatile int *cancel_requested, mkpfs_progress_callback progress, void *opaque) {
+int mkpfs_pack_pfsc_file(const char *input_path, const char *output_path, int compression_level, const atomic_int *cancel_requested, mkpfs_progress_callback progress, void *opaque) {
   return mkpfs_pack_pfsc_file_ex(input_path, output_path, compression_level, 1, cancel_requested, progress, opaque);
 }
 
@@ -359,7 +400,7 @@ static int copy_file_at(FILE *out, uint64_t offset, const char *path) {
 int mkpfs_wrap_exfat_file_ex(const char *exfat_path, const char *output_path,
                              const char *inner_name, int compression_level,
                              unsigned int workers,
-                             volatile int *cancel_requested,
+                             const atomic_int *cancel_requested,
                           mkpfs_progress_callback progress, void *opaque) {
   struct stat st; char pfsc_path[PATH_MAX], temp_path[PATH_MAX]; FILE *out = NULL;
   unsigned char *inode_table = NULL, *root_dir = NULL; uint64_t pfsc_size, raw_size, pfsc_blocks, final_blocks;
@@ -372,8 +413,8 @@ int mkpfs_wrap_exfat_file_ex(const char *exfat_path, const char *output_path,
   pfsc_size = (uint64_t)st.st_size; raw_size = 0; pfsc_blocks = (pfsc_size + 65535) / 65536;
   if (mkpfs_verify_pfsc_file(pfsc_path, &raw_size, NULL) != 0) { unlink(pfsc_path); return EINVAL; }
   if (pfs_hash_path(inner_name, &hash) != 0) { unlink(pfsc_path); return EINVAL; }
-  if (snprintf(temp_path, sizeof(temp_path), "%s.tmp.%ld", output_path, (long)getpid()) >= (int)sizeof(temp_path)) { unlink(pfsc_path); return ENAMETOOLONG; }
-  out = fopen(temp_path, "wb+"); if (!out) { unlink(pfsc_path); return errno; }
+  rc = open_secure_temp_file(output_path, "pfs", temp_path, sizeof(temp_path), &out);
+  if (rc) { unlink(pfsc_path); return rc; }
   inode_table = (unsigned char *)calloc(4, 0xA8); root_dir = (unsigned char *)calloc(1, 65536);
   if (!inode_table || !root_dir) { free(inode_table); free(root_dir); fclose(out); unlink(temp_path); unlink(pfsc_path); return ENOMEM; }
   size_t pos = 0;
@@ -391,14 +432,15 @@ int mkpfs_wrap_exfat_file_ex(const char *exfat_path, const char *output_path,
   put_i64le(header + 0x00, 2); put_i64le(header + 0x08, 20130315); put_i64le(header + 0x10, 0); header[0x1a] = 1; put_u32le(header + 0x1c, 0x0008); put_u32le(header + 0x20, 65536); put_i64le(header + 0x28, 1); put_i64le(header + 0x30, 4); put_i64le(header + 0x38, 0); put_i64le(header + 0x40, 1); put_u32le(header + 0x368, 1);
   if (write_all(out, header, sizeof(header)) || write_all(out, inode_table, 4 * 0xA8)) { rc = EIO; goto wrap_failed; }
   if (fseeko(out, 2 * 65536, SEEK_SET) != 0 || write_all(out, root_dir, 65536) || fseeko(out, 3 * 65536, SEEK_SET) != 0 || write_all(out, fpt, sizeof(fpt)) || fseeko(out, 5 * 65536, SEEK_SET) != 0 || write_all(out, uroot, sizeof(uroot)) || copy_file_at(out, 6 * 65536, pfsc_path)) { rc = EIO; goto wrap_failed; }
-  final_blocks = 6 + pfsc_blocks; put_i64le(header + 0x38, (int64_t)final_blocks); if (fseeko(out, 0, SEEK_SET) != 0 || write_all(out, header, sizeof(header)) || fflush(out) != 0) { rc = EIO; goto wrap_failed; }
-  fclose(out); out = NULL; if (rename(temp_path, output_path) != 0) { rc = errno; goto wrap_failed_no_out; }
+  final_blocks = 6 + pfsc_blocks; put_i64le(header + 0x38, (int64_t)final_blocks); if (fseeko(out, 0, SEEK_SET) != 0 || write_all(out, header, sizeof(header)) || fflush(out) != 0 || fsync(fileno(out)) != 0) { rc = EIO; goto wrap_failed; }
+  if (fclose(out) != 0) { out = NULL; rc = EIO; goto wrap_failed_no_out; }
+  out = NULL; if (rename(temp_path, output_path) != 0) { rc = errno; goto wrap_failed_no_out; }
   unlink(pfsc_path); free(inode_table); free(root_dir); return 0;
 wrap_failed: if (out) fclose(out);
 wrap_failed_no_out: unlink(temp_path); unlink(pfsc_path); free(inode_table); free(root_dir); return rc;
 }
 
-int mkpfs_wrap_exfat_file(const char *exfat_path, const char *output_path, const char *inner_name, int compression_level, volatile int *cancel_requested, mkpfs_progress_callback progress, void *opaque) {
+int mkpfs_wrap_exfat_file(const char *exfat_path, const char *output_path, const char *inner_name, int compression_level, const atomic_int *cancel_requested, mkpfs_progress_callback progress, void *opaque) {
   return mkpfs_wrap_exfat_file_ex(exfat_path, output_path, inner_name, compression_level, 1, cancel_requested, progress, opaque);
 }
 
@@ -406,6 +448,8 @@ typedef struct exfat_node {
   char *name;
   char *path;
   int is_dir;
+  dev_t device;
+  ino_t inode;
   uint64_t size;
   struct exfat_node **children;
   size_t child_count;
@@ -420,9 +464,9 @@ static void exfat_free_tree(exfat_node_t *node) {
   free(node->children); free(node->name); free(node->path); free(node);
 }
 
-static int exfat_name_cmp(const struct dirent **a, const struct dirent **b) {
-  const unsigned char *pa = (const unsigned char *)(*a)->d_name;
-  const unsigned char *pb = (const unsigned char *)(*b)->d_name;
+static int exfat_name_compare(const char *a, const char *b) {
+  const unsigned char *pa = (const unsigned char *)a;
+  const unsigned char *pb = (const unsigned char *)b;
   while (*pa && *pb) {
     int ca = tolower(*pa++), cb = tolower(*pb++);
     if (ca != cb) return ca - cb;
@@ -430,8 +474,22 @@ static int exfat_name_cmp(const struct dirent **a, const struct dirent **b) {
   return *pa - *pb;
 }
 
+static int exfat_node_cmp(const void *a, const void *b) {
+  const exfat_node_t *const *left = a;
+  const exfat_node_t *const *right = b;
+  return exfat_name_compare((*left)->name, (*right)->name);
+}
+
 static int exfat_ignored_name(const char *name) {
   return !strcmp(name, ".") || !strcmp(name, "..") || !strcmp(name, ".DS_Store") || !strcmp(name, "Thumbs.db");
+}
+
+static int exfat_cluster_offset(uint32_t heap_offset, uint32_t cluster,
+                                uint64_t *offset_out) {
+  if (cluster < 2 || !offset_out) return EINVAL;
+  *offset_out = (uint64_t)heap_offset * 512u +
+                (uint64_t)(cluster - 2u) * 65536u;
+  return 0;
 }
 
 static int exfat_add_child(exfat_node_t *parent, exfat_node_t *child) {
@@ -445,37 +503,49 @@ static int exfat_add_child(exfat_node_t *parent, exfat_node_t *child) {
   return 0;
 }
 
-static exfat_node_t *exfat_scan_tree(const char *path, const char *name, int root, int *error_out) {
+static exfat_node_t *exfat_scan_tree(const char *path, const char *name, int root, int *error_out, size_t *node_count, size_t depth) {
   struct stat st;
   exfat_node_t *node;
+  if (!node_count || depth > EXFAT_MAX_TREE_DEPTH) { *error_out = ELOOP; return NULL; }
+  if (*node_count >= EXFAT_MAX_TREE_NODES) { *error_out = EFBIG; return NULL; }
   if (lstat(path, &st) != 0) { *error_out = errno; return NULL; }
-  if (!root && S_ISLNK(st.st_mode)) { *error_out = ELOOP; return NULL; }
+  if (S_ISLNK(st.st_mode)) { *error_out = ELOOP; return NULL; }
   if (!root && !S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode)) { *error_out = EINVAL; return NULL; }
   node = (exfat_node_t *)calloc(1, sizeof(*node));
   if (!node) { *error_out = ENOMEM; return NULL; }
+  (*node_count)++;
   node->name = strdup(name ? name : ""); node->path = strdup(path);
-  node->is_dir = root || S_ISDIR(st.st_mode); node->size = node->is_dir ? 0 : (uint64_t)st.st_size;
+  node->is_dir = root || S_ISDIR(st.st_mode); node->device = st.st_dev; node->inode = st.st_ino; node->size = node->is_dir ? 0 : (uint64_t)st.st_size;
+  if (!node->is_dir && node->size > (uint64_t)(UINT32_MAX - 2u) * 65536u) { exfat_free_tree(node); *error_out = EFBIG; return NULL; }
   if (!node->name || !node->path) { exfat_free_tree(node); *error_out = ENOMEM; return NULL; }
   if (node->is_dir) {
-    struct dirent **entries = NULL;
-    int count = scandir(path, &entries, NULL, exfat_name_cmp);
-    if (count < 0) { exfat_free_tree(node); *error_out = errno; return NULL; }
-    for (int i = 0; i < count; i++) {
-      if (!exfat_ignored_name(entries[i]->d_name)) {
+    DIR *dir = opendir(path);
+    struct dirent *entry;
+    if (!dir) { exfat_free_tree(node); *error_out = errno; return NULL; }
+    while ((entry = readdir(dir))) {
+      if (!exfat_ignored_name(entry->d_name)) {
         char child_path[PATH_MAX];
         exfat_node_t *child;
-        if (snprintf(child_path, sizeof(child_path), "%s/%s", path, entries[i]->d_name) >= (int)sizeof(child_path)) {
-          *error_out = ENAMETOOLONG; free(entries[i]); for (int j = i + 1; j < count; j++) free(entries[j]); free(entries); exfat_free_tree(node); return NULL;
+        if (snprintf(child_path, sizeof(child_path), "%s/%s", path, entry->d_name) >= (int)sizeof(child_path)) {
+          *error_out = ENAMETOOLONG; closedir(dir); exfat_free_tree(node); return NULL;
         }
-        child = exfat_scan_tree(child_path, entries[i]->d_name, 0, error_out);
+        child = exfat_scan_tree(child_path, entry->d_name, 0, error_out, node_count, depth + 1);
         if (!child || exfat_add_child(node, child)) {
           if (child) exfat_free_tree(child);
-          free(entries[i]); for (int j = i + 1; j < count; j++) free(entries[j]); free(entries); exfat_free_tree(node); return NULL;
+          closedir(dir); exfat_free_tree(node); return NULL;
         }
       }
-      free(entries[i]);
     }
-    free(entries);
+    closedir(dir);
+    if(node->child_count > 1) {
+      qsort(node->children, node->child_count, sizeof(*node->children),
+            exfat_node_cmp);
+    }
+    for (size_t i = 1; i < node->child_count; i++) {
+      if (!strcasecmp(node->children[i - 1]->name, node->children[i]->name)) {
+        *error_out = EEXIST; exfat_free_tree(node); return NULL;
+      }
+    }
   }
   return node;
 }
@@ -495,8 +565,8 @@ static uint32_t exfat_node_clusters(const exfat_node_t *node, int root) {
   return exfat_ceil_clusters(node->size);
 }
 
-static uint32_t exfat_tree_clusters(const exfat_node_t *node, int root) {
-  uint32_t total = exfat_node_clusters(node, root);
+static uint64_t exfat_tree_clusters(const exfat_node_t *node, int root) {
+  uint64_t total = exfat_node_clusters(node, root);
   for (size_t i = 0; i < node->child_count; i++) total += exfat_tree_clusters(node->children[i], 0);
   return total;
 }
@@ -542,11 +612,13 @@ static size_t exfat_file_entry_set(unsigned char *out, size_t capacity, const ex
   return total;
 }
 
-static int exfat_write_directory(FILE *out, const exfat_node_t *node, int root, uint32_t bitmap_clusters, uint32_t upcase_clusters, uint32_t cluster_count) {
+static int exfat_write_directory(FILE *out, const exfat_node_t *node, int root, uint32_t bitmap_clusters, uint32_t upcase_clusters, uint32_t cluster_count, uint32_t heap_offset) {
   uint64_t capacity = (uint64_t)node->cluster_count * 65536u;
   uint64_t used = 0;
+  uint64_t offset;
   unsigned char special[96];
-  if (fseeko(out, (off_t)node->first_cluster * 65536, SEEK_SET) != 0) return EIO;
+  if (exfat_cluster_offset(heap_offset, node->first_cluster, &offset) ||
+      fseeko(out, (off_t)offset, SEEK_SET) != 0) return EIO;
   if (root) {
     memset(special, 0, sizeof(special));
     special[0] = 0x83;
@@ -564,13 +636,13 @@ static int exfat_write_directory(FILE *out, const exfat_node_t *node, int root, 
   return used <= capacity ? write_zeros(out, capacity - used) : EIO;
 }
 
-static int exfat_write_directories(FILE *out, const exfat_node_t *node, int root, uint32_t bitmap_clusters, uint32_t upcase_clusters, uint32_t cluster_count) {
+static int exfat_write_directories(FILE *out, const exfat_node_t *node, int root, uint32_t bitmap_clusters, uint32_t upcase_clusters, uint32_t cluster_count, uint32_t heap_offset) {
   for (size_t i = 0; i < node->child_count; i++) {
     const exfat_node_t *child = node->children[i];
     if (child->is_dir) {
-      int rc = exfat_write_directory(out, child, 0, bitmap_clusters, upcase_clusters, cluster_count);
+      int rc = exfat_write_directory(out, child, 0, bitmap_clusters, upcase_clusters, cluster_count, heap_offset);
       if (rc) return rc;
-      rc = exfat_write_directories(out, child, 0, bitmap_clusters, upcase_clusters, cluster_count);
+      rc = exfat_write_directories(out, child, 0, bitmap_clusters, upcase_clusters, cluster_count, heap_offset);
       if (rc) return rc;
     }
   }
@@ -589,17 +661,25 @@ static void exfat_chain_tree(unsigned char *fat, const exfat_node_t *node) {
   for (size_t i = 0; i < node->child_count; i++) exfat_chain_tree(fat, node->children[i]);
 }
 
-static int exfat_write_file_data(FILE *out, const exfat_node_t *node, volatile int *cancel_requested, mkpfs_progress_callback progress, void *opaque, uint64_t *done, uint64_t total) {
+static int exfat_write_file_data(FILE *out, const exfat_node_t *node, const atomic_int *cancel_requested, mkpfs_progress_callback progress, void *opaque, uint64_t *done, uint64_t total, uint32_t heap_offset) {
   if (node->is_dir) {
-    for (size_t i = 0; i < node->child_count; i++) { int rc = exfat_write_file_data(out, node->children[i], cancel_requested, progress, opaque, done, total); if (rc) return rc; }
+    for (size_t i = 0; i < node->child_count; i++) { int rc = exfat_write_file_data(out, node->children[i], cancel_requested, progress, opaque, done, total, heap_offset); if (rc) return rc; }
     return 0;
   }
   if (!node->size) return 0;
-  FILE *in = fopen(node->path, "rb"); unsigned char *buffer = (unsigned char *)malloc(1024 * 1024); if (!in || !buffer) { if (in) fclose(in); free(buffer); return in ? ENOMEM : errno; }
-  if (fseeko(out, (off_t)node->first_cluster * 65536, SEEK_SET) != 0) { fclose(in); free(buffer); return EIO; }
+  struct stat st;
+  int fd;
+  if (lstat(node->path, &st) || !S_ISREG(st.st_mode) || st.st_dev != node->device || st.st_ino != node->inode || (uint64_t)st.st_size != node->size) return ESTALE;
+  fd = open(node->path, O_RDONLY | O_NOFOLLOW);
+  if (fd < 0) return errno;
+  if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_dev != node->device || st.st_ino != node->inode || (uint64_t)st.st_size != node->size) { close(fd); return ESTALE; }
+  FILE *in = fdopen(fd, "rb"); unsigned char *buffer = (unsigned char *)malloc(1024 * 1024); if (!in || !buffer) { if (in) fclose(in); else close(fd); free(buffer); return ENOMEM; }
+  uint64_t offset;
+  if (exfat_cluster_offset(heap_offset, node->first_cluster, &offset) ||
+      fseeko(out, (off_t)offset, SEEK_SET) != 0) { fclose(in); free(buffer); return EIO; }
   uint64_t remaining = node->size;
   while (remaining) {
-    if (cancel_requested && *cancel_requested) { fclose(in); free(buffer); return ECANCELED; }
+    if (cancellation_requested(cancel_requested)) { fclose(in); free(buffer); return ECANCELED; }
     size_t want = remaining > 1024 * 1024 ? 1024 * 1024 : (size_t)remaining;
     size_t got = fread(buffer, 1, want, in); if (got != want || write_all(out, buffer, got)) { fclose(in); free(buffer); return EIO; }
     remaining -= got; *done += got;
@@ -622,37 +702,39 @@ static int exfat_read_title_id(const char *source, char *out, size_t out_size) {
   return 0;
 }
 
-static int exfat_write_folder(const char *source, const char *output, volatile int *cancel_requested, mkpfs_progress_callback progress, void *opaque, uint64_t *image_size) {
-  int error = 0; exfat_node_t *root = exfat_scan_tree(source, "/", 1, &error); FILE *out = NULL; unsigned char *fat = NULL; unsigned char boot[12 * 512]; uint32_t bitmap_clusters = 1, upcase_clusters, content_clusters, cluster_count, next_cluster, fat_entries, fat_sectors, heap_offset, volume_length; uint64_t total_bytes = 0, done = 0; char temp[PATH_MAX];
+static int exfat_write_folder(const char *source, const char *output, const atomic_int *cancel_requested, mkpfs_progress_callback progress, void *opaque, uint64_t *image_size) {
+  int error = 0; size_t node_count = 0; exfat_node_t *root = exfat_scan_tree(source, "/", 1, &error, &node_count, 0); FILE *out = NULL; unsigned char *fat = NULL; unsigned char boot[12 * 512]; uint32_t bitmap_clusters = 1, upcase_clusters, content_clusters, cluster_count, next_cluster, fat_entries, fat_sectors, heap_offset; uint64_t content_clusters64, volume_length, total_bytes = 0, done = 0; char temp[PATH_MAX];
   if (!root) return error ? error : EIO;
   upcase_clusters = (MKPFS_EXFAT_UPCASE_SIZE + 65535u) / 65536u;
-  content_clusters = exfat_tree_clusters(root, 1) + upcase_clusters;
+  content_clusters64 = exfat_tree_clusters(root, 1) + upcase_clusters;
+  if (content_clusters64 > UINT32_MAX - 65536u) { exfat_free_tree(root); return EFBIG; }
+  content_clusters = (uint32_t)content_clusters64;
   while (bitmap_clusters != (uint32_t)(((bitmap_clusters + content_clusters + 7u) / 8u + 65535u) / 65536u)) bitmap_clusters = (uint32_t)(((bitmap_clusters + content_clusters + 7u) / 8u + 65535u) / 65536u);
   cluster_count = bitmap_clusters + content_clusters;
   next_cluster = 2 + bitmap_clusters + upcase_clusters;
   exfat_assign_clusters(root, 1, &next_cluster);
-  fat_entries = cluster_count + 2; fat_sectors = ((fat_entries * 4u + 511u) / 512u + 127u) / 128u * 128u; heap_offset = ((128u + fat_sectors + 127u) / 128u) * 128u; volume_length = heap_offset + cluster_count * 128u;
+  fat_entries = cluster_count + 2; fat_sectors = ((fat_entries * 4u + 511u) / 512u + 127u) / 128u * 128u; heap_offset = ((128u + fat_sectors + 127u) / 128u) * 128u; volume_length = (uint64_t)heap_offset + (uint64_t)cluster_count * 128u;
   for (size_t i = 0; i < root->child_count; i++) total_bytes += root->children[i]->size;
-  if (snprintf(temp, sizeof(temp), "%s.tmp.%ld", output, (long)getpid()) >= (int)sizeof(temp)) { exfat_free_tree(root); return ENAMETOOLONG; }
-  out = fopen(temp, "wb+"); if (!out) { exfat_free_tree(root); return errno; }
+  if ((error = open_secure_temp_file(output, "exfat", temp, sizeof(temp), &out))) { exfat_free_tree(root); return error; }
   memset(boot, 0, sizeof(boot)); boot[0] = 0xEB; boot[1] = 0x76; boot[2] = 0x90; memcpy(boot + 3, "EXFAT   ", 8); put_u64le(boot + 72, volume_length); put_u32le(boot + 80, 128); put_u32le(boot + 84, fat_sectors); put_u32le(boot + 88, heap_offset); put_u32le(boot + 92, cluster_count); put_u32le(boot + 96, root->first_cluster); put_u32le(boot + 100, 0x4D6B5046u); put_u16le(boot + 104, 0x0100); boot[108] = 9; boot[109] = 7; boot[110] = 1; boot[111] = 0x80; boot[112] = 0xFF; put_u16le(boot + 510, 0xAA55); for (int s = 1; s <= 8; s++) put_u32le(boot + s * 512 + 508, 0xAA550000u); uint32_t checksum = 0; for (size_t i = 0; i < 11 * 512; i++) if (i != 106 && i != 107 && i != 112) checksum = ((checksum << 31) | (checksum >> 1)) + boot[i]; for (int i = 11 * 512; i < 12 * 512; i += 4) put_u32le(boot + i, checksum);
   if (write_all(out, boot, sizeof(boot)) || write_all(out, boot, sizeof(boot)) || write_zeros(out, (128u - 24u) * 512u)) { error = EIO; goto exfat_failed; }
   fat = (unsigned char *)calloc(1, (size_t)fat_sectors * 512u); if (!fat) { error = ENOMEM; goto exfat_failed; } put_u32le(fat, 0xFFFFFFF8u); put_u32le(fat + 4, 0xFFFFFFFFu); exfat_chain(fat, 2, bitmap_clusters); exfat_chain(fat, 2 + bitmap_clusters, upcase_clusters); exfat_chain_tree(fat, root); if (write_all(out, fat, (size_t)fat_sectors * 512u) || write_zeros(out, (uint64_t)(heap_offset - 128u - fat_sectors) * 512u)) { error = EIO; goto exfat_failed; }
   unsigned char *bitmap = (unsigned char *)calloc(1, (size_t)bitmap_clusters * 65536u); if (!bitmap) { error = ENOMEM; goto exfat_failed; } memset(bitmap, 0xFF, (size_t)((cluster_count + 7u) / 8u)); if (write_all(out, bitmap, (size_t)bitmap_clusters * 65536u) || write_all(out, mkpfs_exfat_upcase, MKPFS_EXFAT_UPCASE_SIZE) || write_zeros(out, (uint64_t)upcase_clusters * 65536u - MKPFS_EXFAT_UPCASE_SIZE)) { free(bitmap); error = EIO; goto exfat_failed; } free(bitmap);
-  if (exfat_write_directory(out, root, 1, bitmap_clusters, upcase_clusters, cluster_count) || exfat_write_directories(out, root, 1, bitmap_clusters, upcase_clusters, cluster_count)) { error = EIO; goto exfat_failed; }
-  if (exfat_write_file_data(out, root, cancel_requested, progress, opaque, &done, total_bytes)) { error = ECANCELED; goto exfat_failed; }
-  if (fflush(out) != 0 || fclose(out) != 0 || rename(temp, output) != 0) { error = errno ? errno : EIO; unlink(temp); goto exfat_done; }
-  *image_size = (uint64_t)volume_length * 512u; error = 0; goto exfat_done;
+  if (exfat_write_directory(out, root, 1, bitmap_clusters, upcase_clusters, cluster_count, heap_offset) || exfat_write_directories(out, root, 1, bitmap_clusters, upcase_clusters, cluster_count, heap_offset)) { error = EIO; goto exfat_failed; }
+  error = exfat_write_file_data(out, root, cancel_requested, progress, opaque, &done, total_bytes, heap_offset);
+  if (error) goto exfat_failed;
+  if (fflush(out) != 0 || fsync(fileno(out)) != 0 || fclose(out) != 0 || rename(temp, output) != 0) { error = errno ? errno : EIO; unlink(temp); goto exfat_done; }
+  out = NULL; *image_size = volume_length * 512u; error = 0; goto exfat_done;
 exfat_failed: if (out) fclose(out); unlink(temp);
 exfat_done: free(fat); exfat_free_tree(root); return error;
 }
 
-int mkpfs_build_exfat_folder(const char *source, const char *output_path, volatile int *cancel_requested, mkpfs_progress_callback progress, void *opaque) {
+int mkpfs_build_exfat_folder(const char *source, const char *output_path, const atomic_int *cancel_requested, mkpfs_progress_callback progress, void *opaque) {
   uint64_t image_size = 0;
   return exfat_write_folder(source, output_path, cancel_requested, progress, opaque, &image_size);
 }
 
-int mkpfs_convert_folder_progress(const char *source, const char *destination, const char *output_name, const mkpfs_native_options_t *options, volatile int *cancel_requested, mkpfs_progress_callback progress, void *opaque) {
+int mkpfs_convert_folder_progress(const char *source, const char *destination, const char *output_name, const mkpfs_native_options_t *options, const atomic_int *cancel_requested, mkpfs_progress_callback progress, void *opaque) {
   mkpfs_scan_result_t scan;
   struct stat st;
   char normalized[PATH_MAX], output[PATH_MAX], exfat_temp[PATH_MAX], inner_name[NAME_MAX + 16];
@@ -677,6 +759,6 @@ int mkpfs_convert_folder_progress(const char *source, const char *destination, c
   return rc;
 }
 
-int mkpfs_convert_folder(const char *source, const char *destination, const char *output_name, const mkpfs_native_options_t *options, volatile int *cancel_requested) {
+int mkpfs_convert_folder(const char *source, const char *destination, const char *output_name, const mkpfs_native_options_t *options, const atomic_int *cancel_requested) {
   return mkpfs_convert_folder_progress(source, destination, output_name, options, cancel_requested, NULL, NULL);
 }

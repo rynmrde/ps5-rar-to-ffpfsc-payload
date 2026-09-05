@@ -49,19 +49,26 @@ typedef struct asset {
 static asset_t* g_asset_head = 0;
 
 
-static  void
-asset_normalize_path(const char *url, char* path) {
+static int
+asset_normalize_path(const char *url, char* path, size_t path_size) {
   char* ptr = path;
 
-  for(size_t i=0; i<strlen(url); i++) {
+  if(!url || !path || !path_size) {
+    return -1;
+  }
+  for(size_t i=0; url[i]; i++) {
     if(url[i] == '/' && url[i+1] == '/') {
       continue;
+    }
+    if((size_t)(ptr - path) + 1 >= path_size) {
+      return -1;
     }
     *ptr = url[i];
     ptr++;
   }
 
   *ptr = '\0';
+  return 0;
 }
 
 
@@ -70,6 +77,9 @@ asset_register(const char* path, const void* data, size_t size,
                const char* mime, const char* encoding) {
   asset_t* a = calloc(1, sizeof(asset_t));
 
+  if(!a) {
+    return;
+  }
   a->path = path;
   a->mime = mime;
   a->encoding = encoding;
@@ -92,7 +102,14 @@ asset_request(struct MHD_Connection *conn, const char* url) {
   const char* encoding = 0;
   char path[PATH_MAX];
 
-  asset_normalize_path(url, path);
+  if(asset_normalize_path(url, path, sizeof(path))) {
+    struct MHD_Response *too_long = MHD_create_response_from_buffer(
+      0, (void *)"", MHD_RESPMEM_PERSISTENT);
+    if(!too_long) return MHD_NO;
+    ret = websrv_queue_response(conn, MHD_HTTP_URI_TOO_LONG, too_long);
+    MHD_destroy_response(too_long);
+    return ret;
+  }
   for(asset_t* a=g_asset_head; a!=0; a=a->next) {
     if(!strcmp(path, a->path)) {
       data = a->data;

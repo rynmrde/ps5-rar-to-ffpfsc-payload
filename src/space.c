@@ -53,7 +53,7 @@ api_space(struct MHD_Connection *conn) {
     {"storageExtended", "/mnt/ext0"},
   };
 #endif
-  char *current = fs_path_value(query_value(conn, "path"));
+  char *current = absolute_path_value(query_value(conn, "path"));
   strbuf_t b = {0};
   int first = 1;
 

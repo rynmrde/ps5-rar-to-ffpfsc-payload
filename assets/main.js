@@ -225,6 +225,10 @@ function hideContentLoading() {
 async function request(path, params, options) {
   const qs = new URLSearchParams(params || {});
   const fetchOptions = Object.assign({ method: "POST" }, options || {});
+  const accessToken = new URLSearchParams(window.location.hash.slice(1)).get("token");
+  if (accessToken && path.startsWith("/api/")) {
+    fetchOptions.headers = Object.assign({}, fetchOptions.headers || {}, { "X-WFM-Token": accessToken });
+  }
   const response = await fetch(path + (qs.toString() ? "?" + qs.toString() : ""), fetchOptions);
   if (!response.ok) {
     const data = await response.json();
@@ -853,7 +857,8 @@ async function openPkgInfo(item) {
     addPkgInfoRow("PKG_CONTENT_FLAGS", pkgHex(data.content_flags));
     if (data.has_icon) {
       pkgInfoImageEl.src = "/api/pkg-icon?path=" + encodeURIComponent(item.path) +
-        "&mtime=" + encodeURIComponent(item.mtime || 0);
+        "&mtime=" + encodeURIComponent(item.mtime || 0) +
+        "&token=" + encodeURIComponent(new URLSearchParams(window.location.hash.slice(1)).get("token") || "");
     }
     pkgInfoInstallBtn.disabled = false;
     pkgInfoOverlayEl.hidden = false;
@@ -2042,7 +2047,8 @@ async function actionDownload() {
     if (downloadFrame) downloadFrame.parentNode.removeChild(downloadFrame);
     downloadFrame = document.createElement("iframe");
     downloadFrame.hidden = true;
-    downloadFrame.src = "/api/download?id=" + encodeURIComponent(data.task_id);
+    downloadFrame.src = "/api/download?id=" + encodeURIComponent(data.task_id) +
+      "&token=" + encodeURIComponent(new URLSearchParams(window.location.hash.slice(1)).get("token") || "");
     document.body.appendChild(downloadFrame);
     setStatus(t("downloadStarted", { name: itemTitle(items) }));
     await pollTasks();
@@ -2072,6 +2078,8 @@ function uploadFileRequest(taskId, file, rel, overwrite, index) {
     const xhr = new XMLHttpRequest();
     uploadXhr = xhr;
     xhr.open("POST", "/api/upload-file", true);
+    const accessToken = new URLSearchParams(window.location.hash.slice(1)).get("token");
+    if (accessToken) xhr.setRequestHeader("X-WFM-Token", accessToken);
     xhr.setRequestHeader("Content-Type", "application/octet-stream");
     xhr.setRequestHeader("X-WFM-Task-ID", String(taskId));
     xhr.setRequestHeader("X-WFM-Path", encodeURIComponent(cwd));

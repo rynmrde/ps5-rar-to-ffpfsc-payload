@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -41,7 +42,7 @@ int main(void) {
   assert(mkpfs_verify_pfsc_file(output, &logical, &blocks) == 0);
   assert(logical == 0x40000 && blocks == 4);
 
-  volatile int cancel = 1;
+  atomic_int cancel = 1;
   assert(mkpfs_pack_pfsc_file_ex(input, canceled, 6, 4, &cancel, progress_cb, NULL) == ECANCELED);
   assert(access(canceled, F_OK) != 0);
 

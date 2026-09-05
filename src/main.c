@@ -19,6 +19,40 @@
 
 #define PROCESS_NAME "web-file-mgr.elf"
 #define DEFAULT_PORT 8888
+#define ACCESS_TOKEN_BYTES 16
+
+static int
+configure_access_token(char *token, size_t token_size) {
+  static const char hex[] = "0123456789abcdef";
+  unsigned char bytes[ACCESS_TOKEN_BYTES];
+  const char *configured = getenv("WFM_ACCESS_TOKEN");
+
+  if(configured && strlen(configured) >= ACCESS_TOKEN_BYTES * 2 &&
+     strlen(configured) < token_size) {
+    memcpy(token, configured, strlen(configured) + 1);
+    return websrv_set_access_token(token);
+  }
+#ifdef __SCE__
+  for(size_t i = 0; i < sizeof(bytes); i += sizeof(uint32_t)) {
+    uint32_t random_value = arc4random();
+    memcpy(bytes + i, &random_value, sizeof(random_value));
+  }
+#else
+  FILE *random = fopen("/dev/urandom", "rb");
+  if(!random || fread(bytes, 1, sizeof(bytes), random) != sizeof(bytes)) {
+    if(random) fclose(random);
+    return -1;
+  }
+  fclose(random);
+#endif
+  if(token_size < sizeof(bytes) * 2 + 1) return -1;
+  for(size_t i = 0; i < sizeof(bytes); i++) {
+    token[i * 2] = hex[bytes[i] >> 4];
+    token[i * 2 + 1] = hex[bytes[i] & 0x0f];
+  }
+  token[sizeof(bytes) * 2] = 0;
+  return websrv_set_access_token(token);
+}
 
 static int
 port_available(unsigned short port) {
@@ -61,73 +95,33 @@ find_available_port(unsigned short start) {
   return 0;
 }
 
-#ifdef __SCE__
-static pid_t
-find_pid(const char *name) {
-  int mib[4] = {1, 14, 8, 0};
-  pid_t mypid = getpid();
-  pid_t pid = -1;
-  size_t buf_size;
-  uint8_t *buf;
-
-  if(sysctl(mib, 4, 0, &buf_size, 0, 0)) {
-    perror("sysctl");
-    return -1;
-  }
-  if(!(buf = malloc(buf_size))) {
-    perror("malloc");
-    return -1;
-  }
-  if(sysctl(mib, 4, buf, &buf_size, 0, 0)) {
-    perror("sysctl");
-    free(buf);
-    return -1;
-  }
-
-  for(uint8_t *ptr = buf; ptr < buf + buf_size;) {
-    int ki_structsize = *(int *)ptr;
-    pid_t ki_pid = *(pid_t *)&ptr[72];
-    char *ki_tdname = (char *)&ptr[447];
-
-    ptr += ki_structsize;
-    if(!strcmp(name, ki_tdname) && ki_pid != mypid) {
-      pid = ki_pid;
-    }
-  }
-
-  free(buf);
-  return pid;
-}
-#endif
-
 int
 main(int argc, char **argv) {
   unsigned short port;
+  char access_token[ACCESS_TOKEN_BYTES * 2 + 1];
 #ifdef __SCE__
   unsigned short notified_port = 0;
-  pid_t pid;
+  int install_launcher = argc > 1 && !strcmp(argv[1], "--install-launcher");
 #endif
-
-  (void)argc;
-  (void)argv;
 
 #ifdef __SCE__
   syscall(SYS_thr_set_name, -1, PROCESS_NAME);
-  while((pid = find_pid(PROCESS_NAME)) > 0) {
-    if(kill(pid, SIGKILL)) {
-      perror("kill");
-      return 1;
-    }
-    sleep(1);
-  }
-#else
 #endif
 
   puts(PROCESS_NAME);
   printf("version: %s\n", VERSION_TAG);
+  if(configure_access_token(access_token, sizeof(access_token))) {
+    fputs("could not generate HTTP access token\n", stderr);
+    return 1;
+  }
 
 #ifdef __SCE__
-  app_install_if_needed();
+  if(install_launcher && app_install_if_needed()) {
+    fputs("launcher installation failed\n", stderr);
+  }
+#else
+  (void)argc;
+  (void)argv;
 #endif
 
   signal(SIGPIPE, SIG_IGN);
@@ -144,7 +138,7 @@ main(int argc, char **argv) {
     printf("listening on port %u\n", port);
 #ifdef __SCE__
     if(notified_port != port) {
-      notify_user("Web File Manager\nVersion: %s\nPort: %u", VERSION_TAG, port);
+      notify_user("Web File Manager\nVersion: %s\nPort: %u\nToken: %s", VERSION_TAG, port, access_token);
       notified_port = port;
     }
 #endif

@@ -101,6 +101,69 @@ body_form_value(const char *body, size_t body_size, const char *key) {
   return NULL;
 }
 
+int
+path_normalize_absolute(const char *input, char *output, size_t output_size) {
+  const char *p;
+  size_t used = 0;
+
+  if(!input || !output || output_size < 2 || input[0] != '/') {
+    errno = EINVAL;
+    return -1;
+  }
+  output[used++] = '/';
+  output[used] = 0;
+  p = input + 1;
+  while(*p) {
+    const char *start = p;
+    size_t len;
+
+    while(*p && *p != '/') {
+      p++;
+    }
+    len = (size_t)(p - start);
+    if(len) {
+      if((len == 1 && start[0] == '.') ||
+         (len == 2 && start[0] == '.' && start[1] == '.')) {
+        errno = EINVAL;
+        return -1;
+      }
+      if(len > NAME_MAX || used + (used > 1 ? 1 : 0) + len >= output_size) {
+        errno = ENAMETOOLONG;
+        return -1;
+      }
+      if(used > 1) {
+        output[used++] = '/';
+      }
+      memcpy(output + used, start, len);
+      used += len;
+      output[used] = 0;
+    }
+    while(*p == '/') {
+      p++;
+    }
+  }
+  return 0;
+}
+
+char *
+absolute_path_value(char *path) {
+  char normalized[PATH_MAX];
+  char *decoded = fs_path_value(path);
+
+  if(!decoded) {
+    return NULL;
+  }
+  if(path_normalize_absolute(decoded, normalized, sizeof(normalized))) {
+    free(decoded);
+    return NULL;
+  }
+  if(!strcmp(decoded, normalized)) {
+    return decoded;
+  }
+  free(decoded);
+  return strdup(normalized);
+}
+
 void
 free_paths(char **paths, size_t count) {
   size_t i;
@@ -161,7 +224,7 @@ parse_paths(const char *raw, char ***out_paths, size_t *out_count) {
     if(!line[0]) {
       continue;
     }
-    if(!(paths[count] = fs_path_value(strdup(line)))) {
+    if(!(paths[count] = absolute_path_value(strdup(line)))) {
       free_paths(paths, count);
       free(copy);
       errno = ENOMEM;
@@ -172,6 +235,7 @@ parse_paths(const char *raw, char ***out_paths, size_t *out_count) {
 
   free(copy);
   if(!count) {
+    free(paths);
     errno = EINVAL;
     return -1;
   }
@@ -243,7 +307,7 @@ path_dirname(const char *path, char *out, size_t size) {
 int
 path_join(char *out, size_t size, const char *dir, const char *name) {
   int n;
-  if(!dir || !name || !dir[0] || !name[0] || strchr(name, '/')) {
+  if(!dir || !name || !dir[0] || !name[0] || !relative_path_safe(name)) {
     errno = EINVAL;
     return -1;
   }

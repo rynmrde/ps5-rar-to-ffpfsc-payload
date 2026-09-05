@@ -12,6 +12,8 @@ char *request_value(struct MHD_Connection *conn, const char *header,
 char *form_decode(const char *src, size_t len);
 char *body_form_value(const char *body, size_t body_size, const char *key);
 
+int path_normalize_absolute(const char *input, char *output, size_t output_size);
+char *absolute_path_value(char *path);
 void free_paths(char **paths, size_t count);
 int parse_paths(const char *raw, char ***out_paths, size_t *out_count);
 

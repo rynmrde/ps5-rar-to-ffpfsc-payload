@@ -23,6 +23,8 @@ typedef enum text_newline {
   TEXT_NEWLINE_CR,
 } text_newline_t;
 
+static pthread_mutex_t g_text_save_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static enum MHD_Result
 send_json_version(struct MHD_Connection *conn, unsigned long long version) {
   char *data;
@@ -245,7 +247,7 @@ send_text_file(struct MHD_Connection *conn, char *data, size_t size,
 
 enum MHD_Result
 api_text(struct MHD_Connection *conn) {
-  char *path = fs_path_value(query_value(conn, "path"));
+  char *path = absolute_path_value(query_value(conn, "path"));
   char *data;
   size_t size;
   struct stat st;
@@ -282,7 +284,7 @@ api_text(struct MHD_Connection *conn) {
 
 enum MHD_Result
 api_text_create(struct MHD_Connection *conn) {
-  char *path = fs_path_value(query_value(conn, "path"));
+  char *path = absolute_path_value(query_value(conn, "path"));
   char *name = fs_path_value(query_value(conn, "name"));
   char target[PATH_MAX];
   int fd = -1;
@@ -377,7 +379,7 @@ done:
 enum MHD_Result
 api_text_save(struct MHD_Connection *conn, const char *body,
               size_t body_size) {
-  char *path = fs_path_value(query_value(conn, "path"));
+  char *path = absolute_path_value(query_value(conn, "path"));
   char *expected = query_value(conn, "version");
   char *current = NULL;
   size_t current_size = 0;
@@ -406,13 +408,16 @@ api_text_save(struct MHD_Connection *conn, const char *body,
     return send_json_error(conn, MHD_HTTP_UNSUPPORTED_MEDIA_TYPE,
                            "file is not valid UTF-8");
   }
+  pthread_mutex_lock(&g_text_save_lock);
   if(read_text_file(path, &current, &current_size, &st)) {
+    pthread_mutex_unlock(&g_text_save_lock);
     free(path); free(expected);
     return send_json_error(conn, MHD_HTTP_NOT_FOUND, "file not found");
   }
   snprintf(version_text, sizeof(version_text), "%016llx",
            text_version((const unsigned char *)current, current_size));
   if(strcmp(expected, version_text)) {
+    pthread_mutex_unlock(&g_text_save_lock);
     free(current);
     free(path); free(expected);
     return send_json_error(conn, MHD_HTTP_CONFLICT,
@@ -420,6 +425,7 @@ api_text_save(struct MHD_Connection *conn, const char *body,
   }
   if(path_dirname(path, parent, sizeof(parent)) ||
      mode_access(path, W_OK) || mode_access(parent, W_OK | X_OK)) {
+    pthread_mutex_unlock(&g_text_save_lock);
     free(current);
     free(path); free(expected);
     return send_json_error(conn, MHD_HTTP_FORBIDDEN,
@@ -428,6 +434,7 @@ api_text_save(struct MHD_Connection *conn, const char *body,
   if(format_text_for_save(body, body_size, (const unsigned char *)current,
                           current_size, &formatted, &formatted_size)) {
     int error = errno;
+    pthread_mutex_unlock(&g_text_save_lock);
     free(current);
     free(path); free(expected);
     errno = error;
@@ -438,6 +445,7 @@ api_text_save(struct MHD_Connection *conn, const char *body,
   }
   free(current);
   ret = write_text_atomic(path, formatted, formatted_size, st.st_mode);
+  pthread_mutex_unlock(&g_text_save_lock);
   free(formatted);
   free(path); free(expected);
   return ret ? send_json_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, NULL)

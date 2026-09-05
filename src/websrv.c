@@ -19,9 +19,14 @@
 #define HTTP_CONNECTION_MEMORY_INCREMENT (2 * 1024 * 1024)
 #define HTTP_SOCKET_RCVBUF_SIZE (4 * 1024 * 1024)
 #define HTTP_SOCKET_SNDBUF_SIZE (4 * 1024 * 1024)
+#define HTTP_CONNECTION_LIMIT 8u
+#define HTTP_PER_IP_CONNECTION_LIMIT 4u
+#define HTTP_CONNECTION_TIMEOUT_SECONDS 30u
+#define HTTP_ACCESS_TOKEN_MAX 64u
 
 static volatile sig_atomic_t g_stop_requested;
 static int g_listen_fd = -1;
+static char g_access_token[HTTP_ACCESS_TOKEN_MAX + 1];
 
 static void
 websrv_tune_connection_socket(int fd) {
@@ -37,9 +42,64 @@ typedef struct request_context {
   char *body;
   size_t size;
   int too_large;
+  int authorized;
   int upload_stream;
   void *upload_ctx;
 } request_context_t;
+
+int
+websrv_set_access_token(const char *token) {
+  size_t length;
+
+  if(!token || !(length = strlen(token)) || length > HTTP_ACCESS_TOKEN_MAX) {
+    return -1;
+  }
+  memcpy(g_access_token, token, length);
+  g_access_token[length] = 0;
+  return 0;
+}
+
+static int
+websrv_token_matches(const char *candidate) {
+  size_t expected_length = strlen(g_access_token);
+  size_t candidate_length;
+  unsigned char difference = 0;
+
+  if(!candidate || !expected_length ||
+     (candidate_length = strlen(candidate)) != expected_length) {
+    return 0;
+  }
+  for(size_t i = 0; i < candidate_length; i++) {
+    difference |= (unsigned char)(candidate[i] ^ g_access_token[i]);
+  }
+  return difference == 0;
+}
+
+static int
+websrv_authorized(struct MHD_Connection *conn) {
+  const char *token = MHD_lookup_connection_value(conn, MHD_HEADER_KIND,
+                                                   "X-WFM-Token");
+  if(!token) {
+    token = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "token");
+  }
+  return websrv_token_matches(token);
+}
+
+static enum MHD_Result
+websrv_access_denied(struct MHD_Connection *conn) {
+  static const char json[] =
+    "{\"ok\":false,\"error\":\"access denied\",\"error_code\":\"access_denied\",\"error_arg\":\"\"}";
+  struct MHD_Response *resp = MHD_create_response_from_buffer(
+    sizeof(json) - 1, (void *)json, MHD_RESPMEM_PERSISTENT);
+  enum MHD_Result ret;
+
+  if(!resp) return MHD_NO;
+  MHD_add_response_header(resp, MHD_HTTP_HEADER_CONTENT_TYPE,
+                          "application/json");
+  ret = websrv_queue_response(conn, MHD_HTTP_FORBIDDEN, resp);
+  MHD_destroy_response(resp);
+  return ret;
+}
 
 static enum MHD_Result
 websrv_body_too_large(struct MHD_Connection *conn) {
@@ -64,7 +124,6 @@ websrv_body_too_large(struct MHD_Connection *conn) {
 enum MHD_Result
 websrv_queue_response(struct MHD_Connection *conn, unsigned int status,
                       struct MHD_Response *resp) {
-  MHD_add_response_header(resp, MHD_HTTP_HEADER_ACCESS_CONTROL_ALLOW_ORIGIN, "*");
   MHD_add_response_header(resp, MHD_HTTP_HEADER_CACHE_CONTROL, "no-store");
   return MHD_queue_response(conn, status, resp);
 }
@@ -103,8 +162,17 @@ websrv_on_request(void *cls, struct MHD_Connection *conn, const char *url,
     }
     ctx->upload_stream = !strcmp(url, "/api/upload-file") &&
                          !strcmp(method, MHD_HTTP_METHOD_POST);
+    ctx->authorized = strncmp(url, "/api/", 5) != 0;
     *con_cls = ctx;
     return MHD_YES;
+  }
+
+  if(!ctx->authorized && !strncmp(url, "/api/", 5)) {
+    ctx->authorized = websrv_authorized(conn);
+  }
+  if(!ctx->authorized) {
+    *upload_data_size = 0;
+    return websrv_access_denied(conn);
   }
 
   if(*upload_data_size) {
@@ -230,7 +298,7 @@ websrv_listen(unsigned short port) {
   g_stop_requested = 0;
   g_listen_fd = srvfd;
 
-  if(!(httpd = MHD_start_daemon(MHD_USE_THREAD_PER_CONNECTION | MHD_USE_ITC |
+  if(!(httpd = MHD_start_daemon(MHD_USE_ITC |
                                 MHD_USE_NO_LISTEN_SOCKET | MHD_USE_DEBUG |
                                 MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_TURBO,
                                 0, NULL, NULL, &websrv_on_request, NULL,
@@ -238,6 +306,12 @@ websrv_listen(unsigned short port) {
                                 (size_t)HTTP_CONNECTION_MEMORY_LIMIT,
                                 MHD_OPTION_CONNECTION_MEMORY_INCREMENT,
                                 (size_t)HTTP_CONNECTION_MEMORY_INCREMENT,
+                                MHD_OPTION_CONNECTION_LIMIT,
+                                (unsigned int)HTTP_CONNECTION_LIMIT,
+                                MHD_OPTION_PER_IP_CONNECTION_LIMIT,
+                                (unsigned int)HTTP_PER_IP_CONNECTION_LIMIT,
+                                MHD_OPTION_CONNECTION_TIMEOUT,
+                                (unsigned int)HTTP_CONNECTION_TIMEOUT_SECONDS,
                                 MHD_OPTION_NOTIFY_COMPLETED,
                                 &websrv_on_completed, NULL, MHD_OPTION_END))) {
     perror("MHD_start_daemon");

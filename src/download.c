@@ -517,7 +517,7 @@ static void
 add_download_filename_header(struct MHD_Response *resp, const char *name) {
   char quoted[PATH_MAX];
   char encoded[PATH_MAX * 3];
-  char header[PATH_MAX * 4];
+  char header[PATH_MAX * 4 + 64];
 
   header_quoted_filename(quoted, sizeof(quoted), name);
   header_percent_filename(encoded, sizeof(encoded), name);
@@ -539,6 +539,7 @@ create_download_task_response(struct MHD_Connection *conn, char **paths,
     free_paths(paths, count);
     return send_json_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "out of memory");
   }
+  atomic_init(&task->cancel_requested, 0);
   if(!count) {
     return download_task_request_error(conn, task, paths, count,
                                        MHD_HTTP_BAD_REQUEST, "no source paths");

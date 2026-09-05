@@ -100,7 +100,7 @@ task_cancel_requested(file_task_t *task) {
   int cancel;
 
   pthread_mutex_lock(&g_tasks_lock);
-  cancel = task->cancel_requested;
+  cancel = atomic_load_explicit(&task->cancel_requested, memory_order_acquire);
   pthread_mutex_unlock(&g_tasks_lock);
   if(cancel) {
     errno = ECANCELED;

@@ -24,7 +24,7 @@ mode_type(const struct stat *st) {
 
 enum MHD_Result
 api_list(struct MHD_Connection *conn) {
-  char *path = fs_path_value(query_value(conn, "path"));
+  char *path = absolute_path_value(query_value(conn, "path"));
   DIR *dir;
   struct dirent *entry;
   struct stat st;
@@ -37,6 +37,10 @@ api_list(struct MHD_Connection *conn) {
 
   if(!path) {
     path = strdup("/");
+    if(!path) {
+      return send_json_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+                             "out of memory");
+    }
   }
   if(!(dir = opendir(path))) {
     free(path);

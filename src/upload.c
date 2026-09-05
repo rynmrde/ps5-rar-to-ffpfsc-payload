@@ -27,6 +27,7 @@ typedef struct upload_context {
   unsigned long long written;
   int failed;
   int error;
+  int allow_overwrite;
   int task_done;
   const char *stage;
   char error_message[256];
@@ -35,7 +36,7 @@ typedef struct upload_context {
 static const char *
 upload_error_message(upload_context_t *ctx) {
   if(!ctx->error_message[0]) {
-    snprintf(ctx->error_message, sizeof(ctx->error_message), "%s failed%s%s: %s",
+    snprintf(ctx->error_message, sizeof(ctx->error_message), "%.64s failed%s%.160s: %s",
              ctx->stage ? ctx->stage : "upload",
              ctx->target[0] ? " for " : "",
              ctx->target[0] ? ctx->target : "",
@@ -119,7 +120,7 @@ finish_upload_context_error(upload_context_t *ctx) {
 }
 
 static file_task_t *
-upload_task_from_conn(struct MHD_Connection *conn) {
+upload_task_from_conn(struct MHD_Connection *conn, int retain) {
   char *idstr = request_value(conn, "X-WFM-Task-ID", "task_id");
   unsigned long id = idstr ? strtoul(idstr, NULL, 10) : 0;
   file_task_t *task = NULL;
@@ -132,6 +133,8 @@ upload_task_from_conn(struct MHD_Connection *conn) {
   task = find_task_locked(id);
   if(!task || task->op != TASK_UPLOAD || !task_is_active(task)) {
     task = NULL;
+  } else if(retain) {
+    task->active_streams++;
   }
   pthread_mutex_unlock(&g_tasks_lock);
   return task;
@@ -209,7 +212,7 @@ done:
 enum MHD_Result
 api_upload_prepare(struct MHD_Connection *conn, const char *body,
                    size_t body_size) {
-  char *path = fs_path_value(body_form_value(body, body_size, "path"));
+  char *path = absolute_path_value(body_form_value(body, body_size, "path"));
   char *src = body_form_value(body, body_size, "src");
   char *total_text = body_form_value(body, body_size, "total");
   char *count_text = body_form_value(body, body_size, "count");
@@ -229,6 +232,7 @@ api_upload_prepare(struct MHD_Connection *conn, const char *body,
     free(rels); free(sizes); free(overwrite);
     return send_json_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "out of memory");
   }
+  atomic_init(&task->cancel_requested, 0);
   if(!path || !src || !count) {
     free_task(task);
     free(path); free(src); free(total_text); free(count_text);
@@ -293,7 +297,7 @@ api_upload_prepare(struct MHD_Connection *conn, const char *body,
 
 enum MHD_Result
 api_upload_finish(struct MHD_Connection *conn) {
-  file_task_t *task = upload_task_from_conn(conn);
+  file_task_t *task = upload_task_from_conn(conn, 0);
 
   if(!task) {
     return send_json_error(conn, MHD_HTTP_NOT_FOUND, "active task not found");
@@ -312,11 +316,11 @@ api_upload_finish(struct MHD_Connection *conn) {
 int
 filemgr_upload_begin(struct MHD_Connection *conn, void **upload_ctx) {
   upload_context_t *ctx;
-  char *base = fs_path_value(request_value(conn, "X-WFM-Path", "path"));
+  char *base = absolute_path_value(request_value(conn, "X-WFM-Path", "path"));
   char *rel = request_value(conn, "X-WFM-Rel", "rel");
   char *overwrite = request_value(conn, "X-WFM-Overwrite", "overwrite");
   char *size_text = request_value(conn, "X-WFM-Size", "size");
-  file_task_t *task = upload_task_from_conn(conn);
+  file_task_t *task = upload_task_from_conn(conn, 1);
   char **checked_dirs = NULL;
   size_t checked_dir_count = 0;
   struct stat st;
@@ -339,11 +343,6 @@ filemgr_upload_begin(struct MHD_Connection *conn, void **upload_ctx) {
     ctx->expected = strtoull(size_text, NULL, 10);
   }
   ctx->task = task;
-  if(task) {
-    pthread_mutex_lock(&g_tasks_lock);
-    task->active_streams++;
-    pthread_mutex_unlock(&g_tasks_lock);
-  }
   if(task && task_cancel_requested(task)) {
     ctx->failed = 1;
     ctx->error = ECANCELED;
@@ -374,6 +373,7 @@ filemgr_upload_begin(struct MHD_Connection *conn, void **upload_ctx) {
       ctx->error = S_ISDIR(st.st_mode) ? EISDIR : EEXIST;
       goto fail;
     }
+    ctx->allow_overwrite = 1;
   } else if(errno != ENOENT) {
     ctx->failed = 1;
     ctx->error = errno;
@@ -399,15 +399,15 @@ filemgr_upload_begin(struct MHD_Connection *conn, void **upload_ctx) {
     goto fail;
   }
   ctx->stage = "creating temporary path";
-  n = snprintf(ctx->temp, sizeof(ctx->temp), "%s.wfm-upload-%ld-%lld.tmp",
-               ctx->target, (long)getpid(), (long long)time(NULL));
+  n = snprintf(ctx->temp, sizeof(ctx->temp), "%s.wfm-upload.XXXXXX",
+               ctx->target);
   if(n < 0 || (size_t)n >= sizeof(ctx->temp)) {
     ctx->failed = 1;
     ctx->error = ENAMETOOLONG;
     goto fail;
   }
   ctx->stage = "opening temporary file";
-  ctx->fd = open(ctx->temp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+  ctx->fd = mkstemp(ctx->temp);
   if(ctx->fd < 0) {
     ctx->failed = 1;
     ctx->error = errno;
@@ -517,9 +517,16 @@ filemgr_upload_finish(struct MHD_Connection *conn, void *upload_ctx) {
   }
   ctx->fd = -1;
   ctx->stage = "moving temporary file into place";
-  if(rename(ctx->temp, ctx->target)) {
-    ctx->error = errno;
-    goto done;
+  if(ctx->allow_overwrite) {
+    if(rename(ctx->temp, ctx->target)) {
+      ctx->error = errno;
+      goto done;
+    }
+  } else {
+    if(link(ctx->temp, ctx->target) || unlink(ctx->temp)) {
+      ctx->error = errno;
+      goto done;
+    }
   }
   if(ctx->task) {
     pthread_mutex_lock(&g_tasks_lock);

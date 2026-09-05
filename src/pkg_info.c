@@ -504,7 +504,7 @@ pkg_error(struct MHD_Connection *conn, const char *path) {
 
 enum MHD_Result
 api_pkg_info(struct MHD_Connection *conn) {
-  char *path = fs_path_value(query_value(conn, "path"));
+  char *path = absolute_path_value(query_value(conn, "path"));
   pkg_source_t pkg = {.fd = -1};
   unsigned char *param;
   strbuf_t json = {0};
@@ -555,7 +555,7 @@ api_pkg_info(struct MHD_Connection *conn) {
 
 enum MHD_Result
 api_pkg_icon(struct MHD_Connection *conn) {
-  char *path = fs_path_value(query_value(conn, "path"));
+  char *path = absolute_path_value(query_value(conn, "path"));
   pkg_source_t pkg = {.fd = -1};
   unsigned char *icon;
   struct MHD_Response *response;

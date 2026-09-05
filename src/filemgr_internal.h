@@ -3,6 +3,7 @@
 #include <limits.h>
 #include <pthread.h>
 #include <stddef.h>
+#include <stdatomic.h>
 #include <time.h>
 
 #include <microhttpd.h>
@@ -62,7 +63,7 @@ typedef struct file_task {
   task_eta_sample_t eta_samples[ETA_SAMPLE_SLOTS];
   unsigned int eta_sample_next;
   unsigned int eta_sample_count;
-  int cancel_requested;
+  atomic_int cancel_requested;
   int reported; /* Terminal state has been included in /api/tasks. */
   unsigned int active_streams;
   time_t created_at;
