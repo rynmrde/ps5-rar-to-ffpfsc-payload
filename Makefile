@@ -86,19 +86,19 @@ $(LINUX_BIN): $(LINUX_SRCS) $(GEN_SRCS)
 	$(HOST_STRIP) $@
 
 tests/test_mkpfs_native: tests/test_mkpfs_native.c src/mkpfs_native.c src/mkpfs_native.h
-	$(HOST_CC) -O2 -Wall -Werror -Isrc -o $@ tests/test_mkpfs_native.c src/mkpfs_native.c -lz
+	$(HOST_CC) -O2 -Wall -Werror -Isrc -o $@ tests/test_mkpfs_native.c src/mkpfs_native.c -lz -pthread
 
 tools/mkpfs-pfsc: tools/mkpfs-pfsc.c src/mkpfs_native.c src/mkpfs_native.h
-	$(HOST_CC) -O2 -Wall -Werror -Isrc -o $@ tools/mkpfs-pfsc.c src/mkpfs_native.c -lz
+	$(HOST_CC) -O2 -Wall -Werror -Isrc -o $@ tools/mkpfs-pfsc.c src/mkpfs_native.c -lz -pthread
 
 tools/mkpfs-wrap-exfat: tools/mkpfs-wrap-exfat.c src/mkpfs_native.c src/mkpfs_native.h
-	$(HOST_CC) -O2 -Wall -Werror -Isrc -o $@ tools/mkpfs-wrap-exfat.c src/mkpfs_native.c -lz
+	$(HOST_CC) -O2 -Wall -Werror -Isrc -o $@ tools/mkpfs-wrap-exfat.c src/mkpfs_native.c -lz -pthread
 
 tools/mkpfs-exfat: tools/mkpfs-exfat.c src/mkpfs_native.c src/mkpfs_native.h
-	$(HOST_CC) -O2 -Wall -Werror -Isrc -o $@ tools/mkpfs-exfat.c src/mkpfs_native.c -lz
+	$(HOST_CC) -O2 -Wall -Werror -Isrc -o $@ tools/mkpfs-exfat.c src/mkpfs_native.c -lz -pthread
 
 tools/mkpfs-convert-folder: tools/mkpfs-convert-folder.c src/mkpfs_native.c src/mkpfs_native.h
-	$(HOST_CC) -O2 -Wall -Werror -Isrc -o $@ tools/mkpfs-convert-folder.c src/mkpfs_native.c -lz
+	$(HOST_CC) -O2 -Wall -Werror -Isrc -o $@ tools/mkpfs-convert-folder.c src/mkpfs_native.c -lz -pthread
 
 compat-upstream: mkpfs-convert-folder
 	./tests/test_folder_compat.sh

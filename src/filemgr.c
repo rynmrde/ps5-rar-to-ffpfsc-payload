@@ -1679,6 +1679,7 @@ task_worker(void *arg) {
       progress.total = scan.total_bytes ? scan.total_bytes * 2 + 1 : 1;
       task_set_total(task, progress.total);
       options.compression_level = task->compression_level <= 9 ? task->compression_level : 7;
+      options.workers = task->conversion_workers;
       options.compression = 1; options.verify = 1; options.verify_structure = 1;
       task_update(task, TASK_RUNNING, "native conversion", 0, NULL);
       ret = mkpfs_convert_folder_progress(task->srcs[0], output_dir, output_name,
@@ -1943,17 +1944,20 @@ api_convert(struct MHD_Connection *conn) {
   char *destination = fs_path_value(query_value(conn, "destination"));
   char *name = fs_path_value(query_value(conn, "name"));
   char *profile = query_value(conn, "profile");
+  char *workers_param = query_value(conn, "workers");
   struct stat source_st, destination_st;
   mkpfs_scan_result_t scan;
   unsigned long level = profile ? strtoul(profile, NULL, 10) : 7;
+  unsigned long workers = 0;
   unsigned long long available = 0;
+  if (workers_param && strcasecmp(workers_param, "auto")) workers = strtoul(workers_param, NULL, 10);
   file_task_t *task = NULL;
   strbuf_t b = {0};
   char **srcs = NULL;
   char output[PATH_MAX];
   int rc = MHD_HTTP_BAD_REQUEST;
 
-  if (!source || !destination || !name || !*name || strchr(name, '/') || strchr(name, '\\') || level > 9 || stat(source, &source_st) || !S_ISDIR(source_st.st_mode) || stat(destination, &destination_st) || !S_ISDIR(destination_st.st_mode)) {
+  if (!source || !destination || !name || !*name || strchr(name, '/') || strchr(name, '\\') || level > 9 || workers > 8 || (workers_param && strcasecmp(workers_param, "auto") && workers == 0) || stat(source, &source_st) || !S_ISDIR(source_st.st_mode) || stat(destination, &destination_st) || !S_ISDIR(destination_st.st_mode)) {
     rc = MHD_HTTP_BAD_REQUEST; goto convert_error;
   }
   if (mkpfs_scan_folder(source, &scan)) { rc = MHD_HTTP_BAD_REQUEST; goto convert_error; }
@@ -1965,7 +1969,7 @@ api_convert(struct MHD_Connection *conn) {
   srcs = calloc(1, sizeof(*srcs)); task = calloc(1, sizeof(*task));
   if (!srcs || !task) { rc = MHD_HTTP_INTERNAL_SERVER_ERROR; goto convert_error; }
   srcs[0] = source; source = NULL; task->srcs = srcs; srcs = NULL; task->src_count = 1;
-  task->op = TASK_CONVERT; task->state = TASK_QUEUED; task->compression_level = (unsigned int)level;
+  task->op = TASK_CONVERT; task->state = TASK_QUEUED; task->compression_level = (unsigned int)level; task->conversion_workers = (unsigned int)workers;
   snprintf(task->src, sizeof(task->src), "%s", task->srcs[0]); snprintf(task->dst, sizeof(task->dst), "%s", output); snprintf(task->conversion_name, sizeof(task->conversion_name), "%s", name);
   task->created_at = task->updated_at = time(NULL);
   pthread_mutex_lock(&g_tasks_lock);
@@ -1974,9 +1978,9 @@ api_convert(struct MHD_Connection *conn) {
   task->id = g_next_task_id++; task->next = g_tasks; g_tasks = task; pthread_mutex_unlock(&g_tasks_lock);
   if (pthread_create(&task->thread, NULL, task_worker, task)) { task_update(task, TASK_FAILED, NULL, 0, "pthread_create failed"); } else pthread_detach(task->thread);
   strbuf_printf(&b, "{\"ok\":true,\"task_id\":%lu}", task->id);
-  free(destination); free(name); free(profile); return send_buffer(conn, MHD_HTTP_OK, b.data, "application/json");
+  free(destination); free(name); free(profile); free(workers_param); return send_buffer(conn, MHD_HTTP_OK, b.data, "application/json");
 convert_error:
-  free(source); free(destination); free(name); free(profile); free(srcs); if (task) { free(task->srcs); free(task); }
+  free(source); free(destination); free(name); free(profile); free(workers_param); free(srcs); if (task) { free(task->srcs); free(task); }
   return send_json_error(conn, rc, rc == MHD_HTTP_INSUFFICIENT_STORAGE ? "insufficient storage" : "invalid conversion request");
 }
 

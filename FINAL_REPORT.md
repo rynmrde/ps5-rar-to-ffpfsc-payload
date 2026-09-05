@@ -16,8 +16,8 @@ The existing Web File Manager now exposes a **Convert folder** action and `/api/
 |---|---|
 | Repository | [https://github.com/rynmrde/mkpfs-ps5](https://github.com/rynmrde/mkpfs-ps5) |
 | Starting commit | `5ba07a1` |
-| Final commit | `989ce34` — `Complete native folder conversion pipeline` |
-| Release/tag | [`v0.2.0-alpha`](https://github.com/rynmrde/mkpfs-ps5/releases/tag/v0.2.0-alpha) prerelease at `367a616` |
+| Final commit | `3547745` — `Finalize native parallel conversion audit` |
+| Release/tag | Existing `v0.2.0-alpha` prerelease; final audit commit is ready for `v0.2.0-alpha.1` |
 | Host PFSC/PFS behavior | Preserved and passing prior compatibility checks |
 | Native folder-to-exFAT | Implemented and upstream-verified |
 | Web conversion task/API/UI | Implemented and Linux smoke-tested |
@@ -44,15 +44,15 @@ The real-folder compatibility test creates `sce_sys/param.json`, `eboot.bin`, an
 `-- eboot.bin
 ```
 
-The HTTP application smoke test successfully queued `/api/convert`, reached task state `done`, created the requested `.ffpfsc`, and passed the same upstream verifier with zero warnings and zero errors.
+The HTTP application smoke test successfully queued `/api/convert`, reached task state `done`, created the requested `.ffpfsc`, and passed the same upstream verifier with zero warnings and zero errors. It also rejected an invalid traversal source path.
 
 ## Benchmark
 
-A sparse 256 MiB folder fixture completed on the sandbox host in **1.334770 seconds**, producing an 813,428-byte `.ffpfsc`. The upstream verifier returned exit code 0 and reported approximately 490.77 MiB/s verification throughput. This is a host smoke benchmark, not a PS5 benchmark or a 50–100 GiB endurance result. The implementation’s directory and file-data paths are bounded and streaming, but large-volume target measurements require suitable storage and a real target environment.
+Using identical sparse 256 MiB fixtures, serial compression completed in **1.596709 seconds (160.33 MiB/s)**, four workers completed in **0.668967 seconds (382.68 MiB/s)**, and Auto mode completed in **0.617278 seconds (414.72 MiB/s)**. Four workers were **2.39× faster** than serial mode, a **58.10% time reduction**; Auto was **2.59× faster**, a **61.34% time reduction**. All outputs were byte-identical at 813,428 bytes with SHA-256 `087bd1a7cf1c37fed8e638ffbe2fe5d1de1c36280c28281c0da3e19deb4fa185`, and each passed upstream verification with zero warnings and zero errors. This is a host smoke benchmark, not a PS5 benchmark or a 50–100 GiB endurance result. The implementation’s directory and file-data paths are bounded and streaming, but large-volume target measurements require suitable storage and a real target environment.
 
 ## PS5 ELF status and blocker
 
-The public Prospero SDK checkout was attempted with:
+The available public Prospero SDK checkout was attempted with:
 
 ```sh
 PS5_PAYLOAD_SDK=/home/ubuntu/work/ps5-sdk/host make
@@ -64,7 +64,7 @@ The build stopped while compiling the target-side libmicrohttpd dependency becau
 fatal error: 'ctype.h' file not found
 ```
 
-The SDK target sysroot is incomplete. No PS5 ELF is claimed, and no PS5 runtime test is claimed. This is the only known release blocker after the host application and upstream format verification passed.
+The wrapper passes `${SDK}/target/include` and `${SDK}/target/lib`, but this checkout has no `target/` directory or target libraries. It does contain `include/freebsd/ctype.h`, but that header is outside the wrapper’s target sysroot and the checkout’s `sce_stubs` are C sources rather than linked target libraries. Therefore adding an include path alone would not produce a valid PS5 ELF. No PS5 ELF is claimed, and no PS5 runtime test is claimed. This is the only known release blocker after the host application and upstream format verification passed.
 
 ## Licensing
 
