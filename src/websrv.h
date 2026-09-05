@@ -22,7 +22,10 @@ enum MHD_Result websrv_queue_response(struct MHD_Connection *conn,
 				      unsigned int status,
 				      struct MHD_Response *resp);
 
+typedef void (*websrv_ready_callback_t)(unsigned short port, void *arg);
+
 int websrv_listen(unsigned short port);
+void websrv_set_ready_callback(websrv_ready_callback_t callback, void *arg);
 void websrv_stop(void);
 int websrv_stop_requested(void);
 int websrv_set_access_token(const char *token);

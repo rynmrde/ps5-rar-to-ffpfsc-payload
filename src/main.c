@@ -95,14 +95,22 @@ find_available_port(unsigned short start) {
   return 0;
 }
 
+#ifdef __SCE__
+static void
+install_launcher_after_server_ready(unsigned short port, void *arg) {
+  (void)arg;
+  if(app_install_if_needed(port)) {
+    fputs("launcher installation failed; server remains available\n", stderr);
+  }
+}
+#endif
+
 int
 main(int argc, char **argv) {
   unsigned short port;
   char access_token[ACCESS_TOKEN_BYTES * 2 + 1];
 #ifdef __SCE__
   unsigned short notified_port = 0;
-  int install_launcher = argc > 1 && !strcmp(argv[1], "--install-launcher");
-  int launcher_attempted = 0;
 #endif
 
 #ifdef __SCE__
@@ -116,10 +124,13 @@ main(int argc, char **argv) {
     return 1;
   }
 
-#ifdef __SCE__
-#else
+#ifndef __SCE__
   (void)argc;
   (void)argv;
+#endif
+
+#ifdef __SCE__
+  websrv_set_ready_callback(install_launcher_after_server_ready, NULL);
 #endif
 
   signal(SIGPIPE, SIG_IGN);
@@ -133,14 +144,6 @@ main(int argc, char **argv) {
       continue;
     }
 
-#ifdef __SCE__
-    if(install_launcher && !launcher_attempted) {
-      launcher_attempted = 1;
-      if(app_install_if_needed(port)) {
-        fputs("launcher installation failed\n", stderr);
-      }
-    }
-#endif
     printf("listening on port %u\n", port);
 #ifdef __SCE__
     if(notified_port != port) {

@@ -27,6 +27,14 @@
 static volatile sig_atomic_t g_stop_requested;
 static int g_listen_fd = -1;
 static char g_access_token[HTTP_ACCESS_TOKEN_MAX + 1];
+static websrv_ready_callback_t g_ready_callback;
+static void *g_ready_callback_arg;
+
+void
+websrv_set_ready_callback(websrv_ready_callback_t callback, void *arg) {
+  g_ready_callback = callback;
+  g_ready_callback_arg = arg;
+}
 
 static void
 websrv_tune_connection_socket(int fd) {
@@ -317,6 +325,10 @@ websrv_listen(unsigned short port) {
     perror("MHD_start_daemon");
     close(srvfd);
     return -1;
+  }
+
+  if(g_ready_callback) {
+    g_ready_callback(port, g_ready_callback_arg);
   }
 
   while(!g_stop_requested) {
