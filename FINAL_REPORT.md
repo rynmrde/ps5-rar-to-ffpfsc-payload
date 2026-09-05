@@ -16,22 +16,24 @@ The existing Web File Manager now exposes a **Convert folder** action and `/api/
 |---|---|
 | Repository | [https://github.com/rynmrde/mkpfs-ps5](https://github.com/rynmrde/mkpfs-ps5) |
 | Starting commit | `5ba07a1` |
-| Final commit | `3547745` — `Finalize native parallel conversion audit` |
-| Release/tag | Existing `v0.2.0-alpha` prerelease; final audit commit is ready for `v0.2.0-alpha.1` |
+| Final commit | `11147d9` — `Add verified PS5 ELF release build` |
+| Release/tag | Existing tags preserved; final ELF artifact is published in [`v0.2.0-alpha.2`](https://github.com/rynmrde/mkpfs-ps5/releases/tag/v0.2.0-alpha.2) |
 | Host PFSC/PFS behavior | Preserved and passing prior compatibility checks |
 | Native folder-to-exFAT | Implemented and upstream-verified |
 | Web conversion task/API/UI | Implemented and Linux smoke-tested |
-| PS5 ELF | Not built; target sysroot blocker documented below |
+| PS5 ELF | Built and validated as `mkpfs-ps5-web-file-mgr.elf`; 410,888 bytes; SHA-256 `36184f375a93ab0f8808583e1a731e7f2f4a4374c9b9e64d51babd26de5e0c9d` |
 
 ## Tests and upstream verification
 
 The clean host matrix passed:
 
 ```sh
-make test-native mkpfs-pfsc mkpfs-wrap-exfat mkpfs-exfat mkpfs-convert-folder
+make clean
+make test-native mkpfs-pfsc mkpfs-wrap-exfat mkpfs-exfat mkpfs-convert-folder linux
 MKPFS_UPSTREAM_ROOT=/home/ubuntu/work/MkPFS make compat-upstream
-make linux
 ```
+
+Frontend JavaScript syntax checks passed for `assets/main.js`, `assets/lang-en.js`, and `assets/lang-zh.js`. The worker benchmark, traversal/symlink checks, atomic-output checks, and HTTP conversion smoke test also passed.
 
 The real-folder compatibility test creates `sce_sys/param.json`, `eboot.bin`, and a nested `sce_sys/subdir/readme.txt`. The generated `.ffpfsc` was accepted by the upstream MkPFS verifier with **Warnings: 0** and **Errors: 0**. Upstream tree inspection of the native raw exFAT stage showed:
 
@@ -48,23 +50,23 @@ The HTTP application smoke test successfully queued `/api/convert`, reached task
 
 ## Benchmark
 
-Using identical sparse 256 MiB fixtures, serial compression completed in **1.596709 seconds (160.33 MiB/s)**, four workers completed in **0.668967 seconds (382.68 MiB/s)**, and Auto mode completed in **0.617278 seconds (414.72 MiB/s)**. Four workers were **2.39× faster** than serial mode, a **58.10% time reduction**; Auto was **2.59× faster**, a **61.34% time reduction**. All outputs were byte-identical at 813,428 bytes with SHA-256 `087bd1a7cf1c37fed8e638ffbe2fe5d1de1c36280c28281c0da3e19deb4fa185`, and each passed upstream verification with zero warnings and zero errors. This is a host smoke benchmark, not a PS5 benchmark or a 50–100 GiB endurance result. The implementation’s directory and file-data paths are bounded and streaming, but large-volume target measurements require suitable storage and a real target environment.
+In the final regression on identical sparse 256 MiB fixtures, serial compression completed in **1.578249 seconds (162.21 MiB/s)**, four workers completed in **0.692410 seconds (369.72 MiB/s)**, and Auto mode completed in **0.622651 seconds (411.15 MiB/s)**. All outputs were byte-identical at 813,428 bytes with SHA-256 `087bd1a7cf1c37fed8e638ffbe2fe5d1de1c36280c28281c0da3e19deb4fa185`, and each passed upstream verification with zero warnings and zero errors. This is a host smoke benchmark, not a PS5 benchmark or a 50–100 GiB endurance result.
 
-## PS5 ELF status and blocker
+## PS5 ELF status
 
-The available public Prospero SDK checkout was attempted with:
+The initial failure was a packaging/state problem, not an unavailable compiler. The checked-out SDK source tree contained `include/freebsd/ctype.h` but had not been installed into its documented target prefix, so `${SDK}/target/include` and `${SDK}/target/lib` did not exist. The documented SDK install was run into an isolated prefix:
 
 ```sh
-PS5_PAYLOAD_SDK=/home/ubuntu/work/ps5-sdk/host make
+make DESTDIR=/tmp/ps5-payload-sdk-staged install
 ```
 
-The build stopped while compiling the target-side libmicrohttpd dependency because the Prospero compiler could not create target executables. A direct native-source probe failed with:
+That generated target headers, CRT objects, linker scripts, libc, pthread, and SCE stub libraries. Target zlib 1.3.1 and libmicrohttpd were then cross-compiled into the staged target homebrew prefix. The application built successfully with:
 
-```text
-fatal error: 'ctype.h' file not found
+```sh
+PS5_PAYLOAD_SDK=/tmp/ps5-payload-sdk-staged make
 ```
 
-The wrapper passes `${SDK}/target/include` and `${SDK}/target/lib`, but this checkout has no `target/` directory or target libraries. It does contain `include/freebsd/ctype.h`, but that header is outside the wrapper’s target sysroot and the checkout’s `sce_stubs` are C sources rather than linked target libraries. Therefore adding an include path alone would not produce a valid PS5 ELF. No PS5 ELF is claimed, and no PS5 runtime test is claimed. This is the only known release blocker after the host application and upstream format verification passed.
+The resulting stripped `web-file-mgr.elf` is 410,888 bytes, has no unresolved symbols, and declares the expected PS5 `.sprx` dependencies including `libkernel_web.sprx`, `libSceLibcInternal.sprx`, `libSceNet.sprx`, `libSceIpmi.sprx`, `libSceAppInstUtil.sprx`, and `libSceUserService.sprx`. It is packaged as `mkpfs-ps5-web-file-mgr.elf` with SHA-256 `36184f375a93ab0f8808583e1a731e7f2f4a4374c9b9e64d51babd26de5e0c9d`. A physical PS5 runtime execution test remains unverified.
 
 ## Licensing
 

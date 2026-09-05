@@ -49,24 +49,19 @@ The repository’s `tests/test_folder_compat.sh` creates a real nested fixture a
 
 The complete host matrix passes. A nested real-folder fixture containing `sce_sys/param.json`, `eboot.bin`, and `sce_sys/subdir/readme.txt` generated a `.ffpfsc` that the upstream MkPFS verifier accepted with zero warnings and zero errors. Upstream tree inspection of the native raw exFAT stage shows the expected nested directory and file names. The benchmark is documented in [BENCHMARKS.md](BENCHMARKS.md).
 
-The benchmark is a host smoke test, not a PS5 performance claim. On the same sparse 256 MiB fixture, serial mode took 1.586118 seconds (161.40 MiB/s), four workers took 0.763786 seconds (335.17 MiB/s), and Auto mode took 0.812662 seconds (315.01 MiB/s). All three outputs were byte-identical and passed upstream verification with zero warnings and zero errors. The implementation is designed for bounded memory and streaming, but 50–100 GiB target measurements require a suitable storage and target environment.
+The benchmark is a host smoke test, not a PS5 performance claim. In the final regression on the same sparse 256 MiB fixture, serial mode took 1.578249 seconds (162.21 MiB/s), four workers took 0.692410 seconds (369.72 MiB/s), and Auto mode took 0.622651 seconds (411.15 MiB/s). All three outputs were byte-identical and passed upstream verification with zero warnings and zero errors. The implementation is designed for bounded memory and streaming, but 50–100 GiB target measurements require a suitable storage and target environment.
 
 ## PS5 build status
 
-The expected target build remains:
+The target build is verified with the public `ps5-payload-dev/sdk` checkout after performing its documented install into a real SDK prefix and building target-compatible dependencies:
 
 ```sh
+make DESTDIR=/path/to/ps5-payload-sdk install
 export PS5_PAYLOAD_SDK=/path/to/ps5-payload-sdk
 make
 ```
 
-The available public SDK checkout was attempted. The build stopped while compiling the required target-side libmicrohttpd dependency because its Prospero compiler could not create target executables. A direct probe reports:
-
-```text
-fatal error: 'ctype.h' file not found
-```
-
-The target sysroot is therefore incomplete for the inherited payload and no PS5 ELF is claimed. The host/Linux application and all host conversion verification remain release-ready.
+The original checkout was source-only and lacked `target/include` and `target/lib`; its `include/freebsd/ctype.h` was therefore outside the wrapper’s expected sysroot. The documented SDK install generated the target headers, CRT objects, linker scripts, libc, pthread library, and SCE stub libraries. Target zlib 1.3.1 and libmicrohttpd were then built into the target homebrew prefix. The resulting `web-file-mgr.elf` is a stripped x86-64 PS5 payload ELF with no unresolved symbols and the expected `.sprx` dependencies. It is packaged in the `v0.2.0-alpha.2` prerelease.
 
 ## Licensing
 
