@@ -2,57 +2,66 @@
 
 ## Outcome
 
-A dedicated private GitHub repository was created and published from the referenced PS5 Web File Manager base. The repository preserves the upstream GPLv3-or-later notices and third-party attribution, adds a native C path-validation and bounded-memory folder-scanning foundation, adds portable regression tests, and adds Linux CI scaffolding.
+The dedicated repository is [rynmrde/mkpfs-ps5](https://github.com/rynmrde/mkpfs-ps5). The latest implementation commit is `51648f7`, titled `Implement native PFSC encoder and PFS wrapper`.
 
-The requested complete native MkPFS conversion was **not completed**. The current native conversion entry point returns `ENOTSUP` after preflight scanning and intentionally never creates a fake `.ffpfsc` file. Therefore this revision must not be described as production-ready, compatible with `.ffpfsc`, or PS5-tested.
+This revision preserves the upstream GPLv3-or-later Web File Manager base and adds a real native PFSC encoder and verifier, a native four-inode PFS wrapper around a prepared exFAT image, host utilities, regression coverage, compatibility documentation, and updated build instructions.
 
-## Repository and release
+The complete requested folder-to-`.ffpfsc` workflow is **not yet complete**. The native `mkpfs_convert_folder` entry point remains guarded with `ENOTSUP`, so the project does not claim that an arbitrary source directory can already be converted on PS5. It also does not claim a PS5 ELF or runtime verification.
+
+## Repository status
 
 | Item | Verified value |
 |---|---|
 | Repository | [https://github.com/rynmrde/mkpfs-ps5](https://github.com/rynmrde/mkpfs-ps5) |
 | Branch | `main` |
-| Latest commit | `aea890f1d497e46aee1b5a297c897d86c1c70b81` — `test: validate native scanner and Linux build` |
-| Release/tag | [v0.1.0-alpha](https://github.com/rynmrde/mkpfs-ps5/releases/tag/v0.1.0-alpha) |
-| PS5 ELF | Not produced; `PS5_PAYLOAD_SDK` and the Prospero toolchain were unavailable |
-| `.ffpfsc` output | Not produced; the native writer is intentionally guarded with `ENOTSUP` |
+| Latest commit | `51648f7` — `Implement native PFSC encoder and PFS wrapper` |
+| Existing release | [v0.1.0-alpha](https://github.com/rynmrde/mkpfs-ps5/releases/tag/v0.1.0-alpha) |
+| Native PFSC output | Implemented and verified against upstream decoder |
+| Native four-inode PFS wrapper | Implemented and verified by upstream MkPFS verifier |
+| Folder-to-exFAT serializer | Not yet implemented; conversion remains guarded |
+| PS5 ELF | Not produced or runtime-tested |
 
-## Build and test results
+## Verified build and compatibility results
 
-The portable regression suite passed with:
+The following commands passed in the sandbox:
 
 ```sh
 make test-native
-```
-
-The inherited Linux payload built successfully with:
-
-```sh
-sudo apt-get install -y build-essential libmicrohttpd-dev
 make linux
+make mkpfs-pfsc mkpfs-wrap-exfat
 ```
 
-A local HTTP smoke test started `web-file-mgr-linux` and successfully retrieved the embedded UI from `http://127.0.0.1:8888/`. The response was served with the payload's existing compressed HTTP behavior.
+A native-generated PFSC payload was decoded by the upstream MkPFS `decode_pfsc_payload` implementation and reproduced all `589824` source bytes. A native-generated four-inode wrapper around an upstream-generated exFAT fixture was checked by the upstream MkPFS verifier with zero warnings and zero errors. The verifier reported four inodes, one directory, one compressed file, 524288 logical bytes, CRC32 `0xEB87F8DD`, and manifest SHA-256 `54e2a33b28fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
 
-The PS5 target was not built because the required external SDK was not present. The expected command, once the user supplies the SDK, is:
+The native PFSC path uses the upstream `<iiiiqqQq` header layout, 64 KiB logical blocks, zlib streams, raw-block fallback, monotonic offset tables, bounded streaming buffers, cancellation checks, progress callbacks, temporary output files, atomic rename, and structural verification.
+
+## Host utilities
+
+The repository now provides these host-side utilities:
 
 ```sh
-export PS5_PAYLOAD_SDK=/path/to/ps5-payload-sdk
-make
+./tools/mkpfs-pfsc INPUT_PFS OUTPUT.ffpfsc 7
+./tools/mkpfs-wrap-exfat INPUT.exfat OUTPUT.ffpfsc TITLEID.exfat
 ```
 
-## What is present
+The resulting wrapper can be checked with the upstream MkPFS checkout using:
 
-The inherited payload includes the file browser, browsing and sorting, copy, move, delete, rename, folder creation, text editing, multi-selection, upload/download, background task progress, cancellation, responsive web UI, startup notifications, embedded assets, and the reference Home Screen launcher flow. The new native source adds path normalization that rejects relative paths, `..` traversal, malformed components, and symlinks during recursive scans, plus bounded-memory size/file/folder accounting.
+```sh
+python3 -m mkpfs verify OUTPUT.ffpfsc
+```
 
-## Known limitation and required next implementation
+The wrapper consumes a prepared raw exFAT image. It does not yet generate that exFAT image from an arbitrary folder in native code.
 
-The remaining major task is a real native port of MkPFS's PFS/exFAT serialization and `.ffpfsc` container logic. This includes the actual on-disk inode and block layout, compression framing and checksums, supported target modes, inode widths, block sizing, verification, structure verification, optional encryption/signature behavior, temporary-output finalization, and fixture-based compatibility testing. The current repository does not expose conversion routes or claim that these format-writing operations exist.
+## Remaining work
 
-## PS5 installation and launch procedure
+The main unimplemented component is the native folder-to-exFAT serializer and its integration with the existing file-manager task/API/UI workflow. That work includes the native directory-tree allocator, exFAT boot regions, FAT, allocation bitmap, up-case table, directory entry sets, streamed file payloads, title-ID naming, conversion-task progress and cancellation, and end-to-end fixture testing from a source folder through a PS5-compatible `.ffpfsc` image.
 
-There is no ELF to install from this revision. After the native writer is completed and the Prospero build succeeds, the inherited reference procedure is to launch an ELF loader on the PS5, send the ELF to the loader's usual port `9021`, wait for the startup notification, and open the displayed HTTP URL from the PS5 browser or another browser on the same network. The inherited payload defaults to port `8888` and tries subsequent ports if the port is occupied. Its reference startup flow installs a Home Screen shortcut when supported and when a matching launcher is missing.
+The public Prospero SDK repository was inspected during the work, but the available checkout was incomplete for this build: the wrapper required additional host compiler setup and the target sysroot lacked headers needed by the inherited file manager. Therefore no PS5 ELF is claimed.
+
+## Preserved application features
+
+The inherited payload still provides browsing and sorting, copy, move, delete, rename, folder creation, text editing, multi-selection, upload and download, background task progress, cancellation, responsive English/Chinese UI, embedded assets, startup notifications, and the reference Home Screen launcher flow.
 
 ## Licensing and attribution
 
-The project remains GPLv3-or-later. The MkPFS reference is GPL-3.0-or-later. The Web File Manager README credits the related PS5 payload projects and records the LGPL status of libmicrohttpd; those notices were preserved and expanded in `THIRD_PARTY_NOTICES.md`. Any future native port must retain the MkPFS copyright/license notices for code actually ported and must comply with the LGPL obligations for libmicrohttpd.
+The project remains GPLv3-or-later. MkPFS is GPLv3-or-later, and libmicrohttpd is LGPL. The original notices and third-party attribution are preserved in `LICENSE` and `THIRD_PARTY_NOTICES.md`.
