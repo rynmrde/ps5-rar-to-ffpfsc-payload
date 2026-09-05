@@ -65,21 +65,17 @@ The original checkout was source-only and lacked `target/include` and `target/li
 
 ## Safety-sensitive runtime behavior
 
-The HTTP API requires a fresh per-launch access token. The startup notification
-shows the token; open the browser UI using `http://PS5-IP:PORT/#token=TOKEN` so
-the browser can attach it to API requests. Static assets remain readable, but
-filesystem and task APIs reject requests without the token. The server limits
-connections, per-peer connections, request body size, and idle connection time.
+On PS5, the HTTP/API behavior follows the upstream Web File Manager and does
+not require a browser-supplied token. The server still limits connections,
+request body size, and idle connection time; host builds retain the token gate
+for local security regression tests.
 
-After the HTTP daemon has initialized successfully and selected its actual
-listen port, normal startup automatically installs or refreshes the managed
-`FMGR88888` shortcut using that port. If launcher installation fails, the
-payload logs the error and leaves the already-started server available. An
-existing launcher with another title ID is never overwritten. The operation
-writes under `/user/app` and calls the PS5 application-install API; it is
-performed only after server initialization, never before it. The
-`--install-launcher` argument is retained as a harmless compatibility
-argument, but is no longer required. The `/api/roots` diagnostic endpoint
+Normal PS5 startup follows the upstream launcher flow: it checks for the
+managed `FMGR88888` application under `/user/app`, creates only missing
+metadata/icon files, and invokes the upstream PS5 application-install API.
+Existing launcher metadata, including unrelated title IDs, is never
+overwritten. The upstream `param.json` metadata uses the standard port 8888
+deeplink. The `/api/roots` diagnostic endpoint
 reports which of `/`, `/user/app`, `/data`, `/mnt`, USB, and extended-storage
 paths are readable; the UI uses it only when the root listing is empty to find
 a usable mounted storage root. Conversion rejects

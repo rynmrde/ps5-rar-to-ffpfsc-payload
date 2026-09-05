@@ -10,7 +10,6 @@
 
 #ifdef __SCE__
 #include <sys/syscall.h>
-#include <sys/sysctl.h>
 #endif
 
 #include "app_installer.h"
@@ -19,40 +18,6 @@
 
 #define PROCESS_NAME "web-file-mgr.elf"
 #define DEFAULT_PORT 8888
-#define ACCESS_TOKEN_BYTES 16
-
-static int
-configure_access_token(char *token, size_t token_size) {
-  static const char hex[] = "0123456789abcdef";
-  unsigned char bytes[ACCESS_TOKEN_BYTES];
-  const char *configured = getenv("WFM_ACCESS_TOKEN");
-
-  if(configured && strlen(configured) >= ACCESS_TOKEN_BYTES * 2 &&
-     strlen(configured) < token_size) {
-    memcpy(token, configured, strlen(configured) + 1);
-    return websrv_set_access_token(token);
-  }
-#ifdef __SCE__
-  for(size_t i = 0; i < sizeof(bytes); i += sizeof(uint32_t)) {
-    uint32_t random_value = arc4random();
-    memcpy(bytes + i, &random_value, sizeof(random_value));
-  }
-#else
-  FILE *random = fopen("/dev/urandom", "rb");
-  if(!random || fread(bytes, 1, sizeof(bytes), random) != sizeof(bytes)) {
-    if(random) fclose(random);
-    return -1;
-  }
-  fclose(random);
-#endif
-  if(token_size < sizeof(bytes) * 2 + 1) return -1;
-  for(size_t i = 0; i < sizeof(bytes); i++) {
-    token[i * 2] = hex[bytes[i] >> 4];
-    token[i * 2 + 1] = hex[bytes[i] & 0x0f];
-  }
-  token[sizeof(bytes) * 2] = 0;
-  return websrv_set_access_token(token);
-}
 
 static int
 port_available(unsigned short port) {
@@ -95,23 +60,18 @@ find_available_port(unsigned short start) {
   return 0;
 }
 
-#ifdef __SCE__
-static void
-install_launcher_after_server_ready(unsigned short port, void *arg) {
-  (void)arg;
-  if(app_install_if_needed(port)) {
-    fputs("launcher installation failed; server remains available\n", stderr);
-  }
-}
-#endif
-
 int
 main(int argc, char **argv) {
   unsigned short port;
-  char access_token[ACCESS_TOKEN_BYTES * 2 + 1];
+#ifndef __SCE__
+  const char *host_token = getenv("WFM_ACCESS_TOKEN");
+#endif
 #ifdef __SCE__
   unsigned short notified_port = 0;
 #endif
+
+  (void)argc;
+  (void)argv;
 
 #ifdef __SCE__
   syscall(SYS_thr_set_name, -1, PROCESS_NAME);
@@ -119,18 +79,16 @@ main(int argc, char **argv) {
 
   puts(PROCESS_NAME);
   printf("version: %s\n", VERSION_TAG);
-  if(configure_access_token(access_token, sizeof(access_token))) {
-    fputs("could not generate HTTP access token\n", stderr);
-    return 1;
-  }
 
 #ifndef __SCE__
-  (void)argc;
-  (void)argv;
+  if(host_token && websrv_set_access_token(host_token)) {
+    fputs("invalid host HTTP access token\n", stderr);
+    return 1;
+  }
 #endif
 
 #ifdef __SCE__
-  websrv_set_ready_callback(install_launcher_after_server_ready, NULL);
+  app_install_if_needed();
 #endif
 
   signal(SIGPIPE, SIG_IGN);
@@ -147,7 +105,7 @@ main(int argc, char **argv) {
     printf("listening on port %u\n", port);
 #ifdef __SCE__
     if(notified_port != port) {
-      notify_user("Web File Manager\nVersion: %s\nPort: %u\nToken: %s", VERSION_TAG, port, access_token);
+      notify_user("Web File Manager\nVersion: %s\nPort: %u", VERSION_TAG, port);
       notified_port = port;
     }
 #endif

@@ -171,6 +171,14 @@ websrv_on_request(void *cls, struct MHD_Connection *conn, const char *url,
     ctx->upload_stream = !strcmp(url, "/api/upload-file") &&
                          !strcmp(method, MHD_HTTP_METHOD_POST);
     ctx->authorized = strncmp(url, "/api/", 5) != 0;
+#ifdef __SCE__
+    /* Match the upstream PS5 Web File Manager: the local PS5 UI/API does not
+       require a browser-supplied token. Host builds retain token protection
+       for regression and security testing. */
+    if(!strncmp(url, "/api/", 5)) {
+      ctx->authorized = 1;
+    }
+#endif
     *con_cls = ctx;
     return MHD_YES;
   }
