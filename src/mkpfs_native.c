@@ -118,7 +118,10 @@ int mkpfs_scan_folder(const char *root, mkpfs_scan_result_t *result) {
 }
 
 static int write_zeros(FILE *out, uint64_t count) {
-  unsigned char zeros[4096] = {0};
+  /* Small files commonly leave almost an entire 64 KiB cluster as padding.
+     A 1 MiB bounded buffer avoids thousands of tiny fwrite calls without
+     changing the serialized bytes or memory behavior for file contents. */
+  static const unsigned char zeros[1024 * 1024] = {0};
   while (count) { size_t n = count > sizeof(zeros) ? sizeof(zeros) : (size_t)count; if (write_all(out, zeros, n)) return EIO; count -= n; }
   return 0;
 }
@@ -661,31 +664,30 @@ static void exfat_chain_tree(unsigned char *fat, const exfat_node_t *node) {
   for (size_t i = 0; i < node->child_count; i++) exfat_chain_tree(fat, node->children[i]);
 }
 
-static int exfat_write_file_data(FILE *out, const exfat_node_t *node, const atomic_int *cancel_requested, mkpfs_progress_callback progress, void *opaque, uint64_t *done, uint64_t total, uint32_t heap_offset) {
+static int exfat_write_file_data(FILE *out, const exfat_node_t *node, const atomic_int *cancel_requested, mkpfs_progress_callback progress, void *opaque, uint64_t *done, uint64_t total, uint32_t heap_offset, unsigned char *buffer) {
   if (node->is_dir) {
-    for (size_t i = 0; i < node->child_count; i++) { int rc = exfat_write_file_data(out, node->children[i], cancel_requested, progress, opaque, done, total, heap_offset); if (rc) return rc; }
+    for (size_t i = 0; i < node->child_count; i++) { int rc = exfat_write_file_data(out, node->children[i], cancel_requested, progress, opaque, done, total, heap_offset, buffer); if (rc) return rc; }
     return 0;
   }
   if (!node->size) return 0;
   struct stat st;
   int fd;
-  if (lstat(node->path, &st) || !S_ISREG(st.st_mode) || st.st_dev != node->device || st.st_ino != node->inode || (uint64_t)st.st_size != node->size) return ESTALE;
   fd = open(node->path, O_RDONLY | O_NOFOLLOW);
   if (fd < 0) return errno;
   if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_dev != node->device || st.st_ino != node->inode || (uint64_t)st.st_size != node->size) { close(fd); return ESTALE; }
-  FILE *in = fdopen(fd, "rb"); unsigned char *buffer = (unsigned char *)malloc(1024 * 1024); if (!in || !buffer) { if (in) fclose(in); else close(fd); free(buffer); return ENOMEM; }
+  FILE *in = fdopen(fd, "rb"); if (!in || !buffer) { if (in) fclose(in); else close(fd); return ENOMEM; }
   uint64_t offset;
   if (exfat_cluster_offset(heap_offset, node->first_cluster, &offset) ||
-      fseeko(out, (off_t)offset, SEEK_SET) != 0) { fclose(in); free(buffer); return EIO; }
+      fseeko(out, (off_t)offset, SEEK_SET) != 0) { fclose(in); return EIO; }
   uint64_t remaining = node->size;
   while (remaining) {
-    if (cancellation_requested(cancel_requested)) { fclose(in); free(buffer); return ECANCELED; }
+    if (cancellation_requested(cancel_requested)) { fclose(in); return ECANCELED; }
     size_t want = remaining > 1024 * 1024 ? 1024 * 1024 : (size_t)remaining;
-    size_t got = fread(buffer, 1, want, in); if (got != want || write_all(out, buffer, got)) { fclose(in); free(buffer); return EIO; }
+    size_t got = fread(buffer, 1, want, in); if (got != want || write_all(out, buffer, got)) { fclose(in); return EIO; }
     remaining -= got; *done += got;
-    if (progress && progress(*done, total, "exfat", node->path, opaque)) { fclose(in); free(buffer); return ECANCELED; }
+    if (progress && progress(*done, total, "exfat", node->path, opaque)) { fclose(in); return ECANCELED; }
   }
-  int rc = write_zeros(out, (uint64_t)node->cluster_count * 65536u - node->size); fclose(in); free(buffer); return rc;
+  int rc = write_zeros(out, (uint64_t)node->cluster_count * 65536u - node->size); fclose(in); return rc;
 }
 
 static int exfat_read_title_id(const char *source, char *out, size_t out_size) {
@@ -721,7 +723,10 @@ static int exfat_write_folder(const char *source, const char *output, const atom
   fat = (unsigned char *)calloc(1, (size_t)fat_sectors * 512u); if (!fat) { error = ENOMEM; goto exfat_failed; } put_u32le(fat, 0xFFFFFFF8u); put_u32le(fat + 4, 0xFFFFFFFFu); exfat_chain(fat, 2, bitmap_clusters); exfat_chain(fat, 2 + bitmap_clusters, upcase_clusters); exfat_chain_tree(fat, root); if (write_all(out, fat, (size_t)fat_sectors * 512u) || write_zeros(out, (uint64_t)(heap_offset - 128u - fat_sectors) * 512u)) { error = EIO; goto exfat_failed; }
   unsigned char *bitmap = (unsigned char *)calloc(1, (size_t)bitmap_clusters * 65536u); if (!bitmap) { error = ENOMEM; goto exfat_failed; } memset(bitmap, 0xFF, (size_t)((cluster_count + 7u) / 8u)); if (write_all(out, bitmap, (size_t)bitmap_clusters * 65536u) || write_all(out, mkpfs_exfat_upcase, MKPFS_EXFAT_UPCASE_SIZE) || write_zeros(out, (uint64_t)upcase_clusters * 65536u - MKPFS_EXFAT_UPCASE_SIZE)) { free(bitmap); error = EIO; goto exfat_failed; } free(bitmap);
   if (exfat_write_directory(out, root, 1, bitmap_clusters, upcase_clusters, cluster_count, heap_offset) || exfat_write_directories(out, root, 1, bitmap_clusters, upcase_clusters, cluster_count, heap_offset)) { error = EIO; goto exfat_failed; }
-  error = exfat_write_file_data(out, root, cancel_requested, progress, opaque, &done, total_bytes, heap_offset);
+  unsigned char *file_buffer = (unsigned char *)malloc(1024 * 1024);
+  if (!file_buffer) { error = ENOMEM; goto exfat_failed; }
+  error = exfat_write_file_data(out, root, cancel_requested, progress, opaque, &done, total_bytes, heap_offset, file_buffer);
+  free(file_buffer);
   if (error) goto exfat_failed;
   if (fflush(out) != 0 || fsync(fileno(out)) != 0 || fclose(out) != 0 || rename(temp, output) != 0) { error = errno ? errno : EIO; unlink(temp); goto exfat_done; }
   out = NULL; *image_size = volume_length * 512u; error = 0; goto exfat_done;
@@ -735,7 +740,6 @@ int mkpfs_build_exfat_folder(const char *source, const char *output_path, const 
 }
 
 int mkpfs_convert_folder_progress(const char *source, const char *destination, const char *output_name, const mkpfs_native_options_t *options, const atomic_int *cancel_requested, mkpfs_progress_callback progress, void *opaque) {
-  mkpfs_scan_result_t scan;
   struct stat st;
   char normalized[PATH_MAX], output[PATH_MAX], exfat_temp[PATH_MAX], inner_name[NAME_MAX + 16];
   int level = options && options->compression_level <= 9 ? (int)options->compression_level : 7;
@@ -743,7 +747,6 @@ int mkpfs_convert_folder_progress(const char *source, const char *destination, c
   int rc;
   if (!source || !destination || !output_name || !*output_name || strchr(output_name, '/') || strchr(output_name, '\\')) return EINVAL;
   if (mkpfs_normalize_path(source, normalized, sizeof(normalized)) != 0) return EINVAL;
-  if (mkpfs_scan_folder(normalized, &scan) != 0) return errno ? errno : EIO;
   if (stat(destination, &st) != 0) return errno;
   if (!S_ISDIR(st.st_mode)) return ENOTDIR;
   if (snprintf(output, sizeof(output), "%s/%s", destination, output_name) >= (int)sizeof(output)) return ENAMETOOLONG;

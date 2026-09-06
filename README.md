@@ -74,8 +74,9 @@ Normal PS5 startup follows the upstream launcher flow: it checks for the
 managed `FMGR88888` application under `/user/app`, creates only missing
 metadata/icon files, and invokes the upstream PS5 application-install API.
 Existing launcher metadata, including unrelated title IDs, is never
-overwritten. The upstream `param.json` metadata uses the standard port 8888
-deeplink. The `/api/roots` diagnostic endpoint
+overwritten. Launcher metadata is generated from the port actually bound by
+the server. Set `WFM_PORT` to request a specific port, or leave it unset to
+let the OS select one. The `/api/roots` diagnostic endpoint
 reports which of `/`, `/user/app`, `/data`, `/mnt`, USB, and extended-storage
 paths are readable; the UI uses it only when the root listing is empty to find
 a usable mounted storage root. Conversion rejects

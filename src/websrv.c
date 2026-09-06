@@ -311,6 +311,17 @@ websrv_listen(unsigned short port) {
     close(srvfd);
     return -1;
   }
+  {
+    struct sockaddr_in bound_addr;
+    socklen_t bound_len = sizeof(bound_addr);
+    if(getsockname(srvfd, (struct sockaddr *)&bound_addr, &bound_len) != 0) {
+      perror("getsockname");
+      close(srvfd);
+      return -1;
+    }
+    port = ntohs(bound_addr.sin_port);
+    printf("listening on port %u\n", (unsigned int)port);
+  }
   g_stop_requested = 0;
   g_listen_fd = srvfd;
 

@@ -17,48 +17,28 @@
 #include "websrv.h"
 
 #define PROCESS_NAME "web-file-mgr.elf"
-#define DEFAULT_PORT 8888
-
-static int
-port_available(unsigned short port) {
-  struct sockaddr_in addr;
-  int fd;
-  int ret;
-
-  if((fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-    perror("socket");
-    return -1;
-  }
-  if(setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int)) < 0) {
-    perror("setsockopt");
-    close(fd);
-    return -1;
-  }
-  memset(&addr, 0, sizeof(addr));
-  addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = htonl(INADDR_ANY);
-  addr.sin_port = htons(port);
-
-  ret = !bind(fd, (struct sockaddr *)&addr, sizeof(addr));
-  close(fd);
-  return ret;
-}
 
 static unsigned short
-find_available_port(unsigned short start) {
-  unsigned int port;
-
-  for(port = start; port <= 65535; port++) {
-    int available = port_available((unsigned short)port);
-    if(available < 0) {
-      return 0;
-    }
-    if(available) {
-      return (unsigned short)port;
-    }
-  }
-  return 0;
+configured_port(void) {
+  const char *value = getenv("WFM_PORT");
+  char *end;
+  unsigned long port;
+  if(!value || !*value) return 0;
+  port = strtoul(value, &end, 10);
+  if(*end || port > 65535u) return 0;
+  return (unsigned short)port;
 }
+
+#ifdef __SCE__
+static void
+server_ready(unsigned short port, void *arg) {
+  (void)arg;
+  if(app_install_if_needed(port)) {
+    fputs("launcher installation failed; server remains available\n", stderr);
+  }
+  notify_user("Web File Manager\nVersion: %s\nPort: %u", VERSION_TAG, port);
+}
+#endif
 
 int
 main(int argc, char **argv) {
@@ -66,10 +46,6 @@ main(int argc, char **argv) {
 #ifndef __SCE__
   const char *host_token = getenv("WFM_ACCESS_TOKEN");
 #endif
-#ifdef __SCE__
-  unsigned short notified_port = 0;
-#endif
-
   (void)argc;
   (void)argv;
 
@@ -88,28 +64,15 @@ main(int argc, char **argv) {
 #endif
 
 #ifdef __SCE__
-  app_install_if_needed();
+  websrv_set_ready_callback(server_ready, NULL);
 #endif
 
   signal(SIGPIPE, SIG_IGN);
   signal(SIGCHLD, SIG_IGN);
 
   while(1) {
-    port = find_available_port(DEFAULT_PORT);
-    if(!port) {
-      fprintf(stderr, "no available port from %u\n", DEFAULT_PORT);
-      sleep(3);
-      continue;
-    }
-
-    printf("listening on port %u\n", port);
-#ifdef __SCE__
-    if(notified_port != port) {
-      notify_user("Web File Manager\nVersion: %s\nPort: %u", VERSION_TAG, port);
-      notified_port = port;
-    }
-#endif
-
+    port = configured_port();
+    printf("listening on requested port %u (0 means automatic)\n", port);
     websrv_listen(port);
     if(websrv_stop_requested()) {
       break;
