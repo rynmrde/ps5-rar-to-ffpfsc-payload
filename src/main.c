@@ -17,15 +17,16 @@
 #include "websrv.h"
 
 #define PROCESS_NAME "web-file-mgr.elf"
+#define DEFAULT_PORT 6777
 
 static unsigned short
 configured_port(void) {
   const char *value = getenv("WFM_PORT");
   char *end;
   unsigned long port;
-  if(!value || !*value) return 0;
+  if(!value || !*value) return DEFAULT_PORT;
   port = strtoul(value, &end, 10);
-  if(*end || port > 65535u) return 0;
+  if(*end || !port || port > 65535u) return DEFAULT_PORT;
   return (unsigned short)port;
 }
 
@@ -72,7 +73,7 @@ main(int argc, char **argv) {
 
   while(1) {
     port = configured_port();
-    printf("listening on requested port %u (0 means automatic)\n", port);
+    printf("listening on requested port %u\n", port);
     websrv_listen(port);
     if(websrv_stop_requested()) {
       break;

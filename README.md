@@ -25,13 +25,13 @@ RAR fixture tests additionally use `7z`; real RAR fixture coverage uses `rar` an
 1. Download `mkpfs-ps5-web-file-mgr.elf` from the latest GitHub release.
 2. Transfer it to the payload manager or loader used by the console.
 3. Load the ELF. The payload starts its local web server before attempting the managed Home Screen launcher refresh.
-4. Read the startup notification for the **actual bound port**. From another device on the same network, open `http://PS5-IP:PORT/`.
+4. By default, open `http://PS5-IP:6777/` from another device on the same network. The startup notification confirms the bound port.
 
-To request a particular port, set `WFM_PORT` in the payload environment before launch. When it is not set, the server asks the operating system for an available port. The startup notification and the managed launcher both use the actual bound port, not a hard-coded `8888` value.
+The payload listens on **port 6777** by default. To use another port, set `WFM_PORT` in the payload environment before launch. The startup notification and the managed launcher both use the actual bound port. `WFM_PORT=0`, invalid values, and an unset value resolve safely to the default port 6777.
 
 ## First Launch and Home Screen launcher
 
-After successful server initialization, MkPFS PS5 refreshes only its managed `FMGR88888` launcher entry. The launcher metadata points to `http://127.0.0.1:ACTUAL_PORT/` and is not installed before the server is ready. Existing unrelated application metadata is never overwritten. If launcher refresh fails, the file manager remains available through the reported network URL.
+After successful server initialization, MkPFS PS5 refreshes only its managed `FMGR88888` launcher entry. By default the launcher opens `http://127.0.0.1:6777/`; when a valid `WFM_PORT` override is used, it opens that actual bound port instead. The launcher is not installed before the server is ready. Existing unrelated application metadata is never overwritten. If launcher refresh fails, the file manager remains available through the reported network URL.
 
 The launcher and real storage access are PS5-runtime behaviors. They cannot be fully verified from a Linux host build. If the launcher does not appear, first confirm that the payload notification reported a running server and open the reported URL from another device.
 
@@ -93,7 +93,7 @@ Downloads are direct GET requests only. They do not support authenticated source
 ## Features
 
 - PS5-native web file browser with explicit source and destination workflows.
-- Actual-port startup notification and managed `FMGR88888` Home Screen launcher refresh.
+- Default port **6777**, matching startup notification and managed `FMGR88888` Home Screen launcher refresh.
 - Bounded-memory MkPFS conversion with deterministic serial or parallel PFSC output.
 - Native RAR and 7z extraction with password, multipart, progress, staging, and cooperative cancellation support.
 - Direct HTTP/HTTPS URL downloader with background jobs, bounded streaming I/O, temporary output, and no overwrite by default.
@@ -108,6 +108,7 @@ make linux test-native test-archive mkpfs-pfsc
 ./tools/smoke_http.sh
 ./tools/test_archive_http.sh
 make test-url-download
+make test-default-port
 
 # Upstream MkPFS format verification
 make compat-upstream MKPFS_UPSTREAM_ROOT=/path/to/MkPFS

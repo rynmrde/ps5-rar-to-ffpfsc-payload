@@ -57,6 +57,7 @@ def send_raw(payload: bytes) -> bytes:
 
 env = os.environ.copy()
 env["WFM_ACCESS_TOKEN"] = token
+env["WFM_PORT"] = str(port)
 with log_path.open("wb") as log:
     proc = subprocess.Popen([str(server)], stdout=log, stderr=subprocess.STDOUT, env=env)
     try:
