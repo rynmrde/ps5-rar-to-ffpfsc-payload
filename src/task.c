@@ -22,6 +22,7 @@ task_op_name(task_op_t op) {
   case TASK_DELETE: return "delete";
   case TASK_CHMOD: return "chmod";
   case TASK_DOWNLOAD: return "download";
+  case TASK_URL_DOWNLOAD: return "url_download";
   case TASK_UPLOAD: return "upload";
   case TASK_CONVERT: return "convert";
   case TASK_EXTRACT: return "extract";

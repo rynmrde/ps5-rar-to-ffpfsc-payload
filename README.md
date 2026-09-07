@@ -1,103 +1,156 @@
 # MkPFS PS5
 
-This repository integrates the PS5 Web File Manager with a native implementation of the upstream MkPFS folder conversion pipeline. It preserves the original file browser, embedded HTTP server, background file tasks, responsive English/Chinese UI, startup notification, and Home Screen launcher flow.
+**MkPFS PS5** is a native PS5 payload that combines the upstream Web File Manager with safe folder-to-`.ffpfsc` conversion, RAR/7z extraction, and direct URL downloading. It is designed for a jailbroken PS5 running a compatible ELF payload loader. The browser UI works on a phone, desktop browser, and the PS5 browser with a controller.
 
-## Completed conversion pipeline
+> This project performs userland file operations only. It does not make kernel patches, access raw block devices, or provide a guarantee against console crashes. Test first with non-critical files and keep a current backup.
 
-The native implementation now supports the complete host-tested pipeline:
+## What it does
 
-> **source folder → native exFAT image → four-inode PS5 PFS wrapper → upstream-compatible PFSC stream → `.ffpfsc`**
+| Capability | Description |
+| --- | --- |
+| **File Manager** | Browses available PS5, internal, USB, and extended-storage paths exposed to the payload. It can copy, move, rename, delete, upload, download, create folders, edit small text files, and change permissions where the filesystem supports them. |
+| **MkPFS conversion** | Converts one selected folder into an upstream-compatible `.ffpfsc` image using streamed I/O, bounded compression queues, deterministic output, cancellation checks, and temporary-output publishing. |
+| **RAR/7z extraction** | Extracts `.rar`, legacy `.rNN`, `.7z`, and first `.7z.001` archives through the vendored `unrar-ps5` engine. Passwords and supported multipart conventions are handled by that engine. |
+| **URL downloader** | Saves a direct HTTP or HTTPS URL to a chosen PS5 folder as a background job. The PS5 build uses the system SceHttp client; HTTPS certificate verification is not disabled. |
+| **Jobs** | Shows queued, running, finished, failed, and canceled file operations with available progress, speed, elapsed time, and ETA information. |
 
-The PFSC and PFS stages from the previous verified revision were preserved. The new exFAT stage uses the upstream deterministic layout: main and backup boot regions, aligned FAT, allocation bitmap, exact upstream up-case table and checksum, root metadata entries, UTF-16 directory-entry sets, contiguous cluster allocation, nested-directory recursion, streamed file payloads, and title-ID-derived embedded names from `sce_sys/param.json` when available.
+## Requirements
 
-The folder serializer uses bounded memory for directory entries and a 1 MiB file-data buffer. It does not load a complete folder or complete file into memory. Output stages use temporary paths and atomic rename. Cancellation is checked during file emission and PFSC processing. PFSC block compression supports a configurable worker count with Auto mode; workers compress independent 64 KiB blocks in a bounded pool while the main thread writes blocks in deterministic order. Serial and parallel outputs are byte-identical on the same fixture.
+You need a jailbroken PS5, an ELF payload loader compatible with the [PS5 Payload SDK][sdk], network access for browser control, and sufficient free storage for every requested operation. Build hosts need a POSIX C/C++ toolchain, `zlib`, `libmicrohttpd`, Python 3, and the SDK prefix containing target `zlib` and `libmicrohttpd`.
 
-## Web File Manager integration
+RAR fixture tests additionally use `7z`; real RAR fixture coverage uses `rar` and `unrar` when those tools are available. These are test-only host dependencies and are not used by the PS5 payload.
 
-The UI has a **Convert folder** action. Select one folder in the existing file browser, navigate to the desired destination directory, choose the output filename and compression level, and start the conversion. The new `/api/convert` endpoint performs source/destination validation, title-safe filename validation, target-space preflight, task queuing, progress reporting, speed/ETA tracking through the existing task API, cancellation, and final output reporting. Completed conversion tasks appear in the existing task history and task overlay.
+## Installation
 
-### RAR and 7z extraction
+1. Download `mkpfs-ps5-web-file-mgr.elf` from the latest GitHub release.
+2. Transfer it to the payload manager or loader used by the console.
+3. Load the ELF. The payload starts its local web server before attempting the managed Home Screen launcher refresh.
+4. Read the startup notification for the **actual bound port**. From another device on the same network, open `http://PS5-IP:PORT/`.
 
-The native **Extract archive** toolbar action accepts a selected `.rar`, legacy `.rNN`, `.7z`, or first `.7z.001` volume. It prompts for the destination folder, output-folder name, optional password, and worker setting. The implementation vendors the extraction engine from [`bizkut/unrar-ps5`](https://github.com/bizkut/unrar-ps5), including its 7-Zip decoder. Both RAR and 7z extraction run as background tasks, report task status and progress, honor cooperative cancellation, and support the multipart conventions handled by that upstream implementation.
+To request a particular port, set `WFM_PORT` in the payload environment before launch. When it is not set, the server asks the operating system for an available port. The startup notification and the managed launcher both use the actual bound port, not a hard-coded `8888` value.
 
-Extraction writes only to a task-private `.mkpfs-extract-<task-id>.tmp` directory beneath the selected destination. The completed directory is published by a single rename only after a successful decoder result. Failure or cancellation removes that private tree without following archive-created symlinks. Existing output names are rejected rather than replaced. Archive member paths are constrained by the upstream decoder, RAR symlink extraction is disabled, and the source, destination, and output name undergo the same filesystem API validation as other file-manager tasks.
+## First Launch and Home Screen launcher
 
-The test suite creates real single-volume and multipart RAR and 7z archives. Run `make test-archive` for the native decoder coverage and `./tools/test_archive_http.sh` after `make linux` for HTTP task, task-state, collision, traversal, cancellation, and cleanup coverage.
+After successful server initialization, MkPFS PS5 refreshes only its managed `FMGR88888` launcher entry. The launcher metadata points to `http://127.0.0.1:ACTUAL_PORT/` and is not installed before the server is ready. Existing unrelated application metadata is never overwritten. If launcher refresh fails, the file manager remains available through the reported network URL.
 
-### PS5 browser and controller operation
+The launcher and real storage access are PS5-runtime behaviors. They cannot be fully verified from a Linux host build. If the launcher does not appear, first confirm that the payload notification reported a running server and open the reported URL from another device.
 
-All toolbar actions remain ordinary focusable buttons, so they work with the PS5 browser controller as well as touch, mouse, and desktop keyboard input. The file rows have focusable name and selection controls. D-pad **Up** and **Down** move between file rows, **Cross/Enter** activates the focused control, **Backspace** or **Alt+Up** opens the parent directory, and **F5** refreshes the current directory. Selecting one folder enables conversion. Selecting one supported archive enables extraction. Destination selection is explicit in the extraction prompt; conversion writes to the directory currently displayed by the browser. Active progress, cancellation, terminal errors, and completed output paths remain available in the existing task overlay and history.
+## PS5 UI and controller use
 
-The host-only tools are also available for reproducible testing:
+The interface keeps ordinary focusable buttons and rows for controller, touch, mouse, and keyboard input. Use the D-pad to move through file rows, **Cross/Enter** to activate the focused control, **Backspace** or **Alt+Up** for the parent folder, and **F5** to refresh. The **Get URL** action is intentionally available in the PS5 browser; browser-to-device upload and browser-download controls remain hidden there because they require a remote browser file picker or download target.
+
+For each task, select a source in the browser when required, navigate to or enter the destination, provide the requested name or settings, then watch the task panel. The current destination remains usable after a failed or canceled operation because partial task staging is removed.
+
+## File Manager
+
+The payload follows the upstream PS5 Web File Manager runtime for root discovery, directory enumeration, the launcher flow, and standard file APIs. The `/api/roots` diagnostic response reports readable locations when the root listing is empty. File APIs reject traversal components, unsafe encoded paths, and unsupported symlink operations where applicable. The project does not add raw-device or kernel access as a storage workaround.
+
+## Convert a folder to `.ffpfsc`
+
+Select exactly one folder, browse to the destination directory, choose **Convert folder**, enter an output name and compression level, and start the job. The conversion pipeline scans and validates the input before creating a same-destination temporary output. It then writes an exFAT image and PFSC wrapper with bounded streaming memory before atomically publishing the final file. Existing output names are rejected, rather than overwritten.
+
+The serializer is compatible with the upstream MkPFS verifier on the project fixtures. It supports Auto or explicitly bounded parallel compression workers. Serial and parallel operation produce byte-identical output for the same input and settings.
+
+### Small-file performance
+
+The reproducible `tools/benchmark_small_files.sh` workload contains 4,000 deterministic 64-byte files. The final serial host benchmark measured an average of **1.270 seconds before** and **1.146 seconds after** the small-file changes, a **9.76% improvement**. The outputs compared byte-for-byte. This is a host result, not a PS5 storage-performance claim.
+
+## RAR and 7z extraction
+
+Select one supported archive, choose **Extract archive**, provide an explicit destination folder and output folder name, then supply a password or worker setting if needed. Extraction runs in a private `.mkpfs-extract-<task-id>.tmp` directory under the selected destination. A completed output directory is published only after the decoder succeeds. Cancellation or failure recursively removes that private directory without following archive-created symlinks.
+
+The native extraction engine is based on [`bizkut/unrar-ps5`][unrar-ps5], including its bundled 7-Zip decoder. The UI accepts `.rar`, legacy `.rNN`, `.7z`, and first `.7z.001` volumes. Multipart support follows the upstream decoder’s supported naming conventions. RAR symbolic-link extraction is disabled in the embedded adapter.
+
+## Downloader
+
+Choose **Get URL**, paste a direct `http://` or `https://` URL, choose a destination folder, and confirm a filename. Downloads are queued as native background jobs and write with a fixed 64 KiB buffer. When a response provides a content length, the Jobs panel displays progress, speed, and ETA. Streaming responses still show transferred bytes and speed when available.
+
+The destination filename must be a safe single filename; existing files are rejected. The task creates a private same-directory temporary file, checks cancellation during reads, synchronizes completed data, and publishes only after success. On filesystems supporting hard links, publication uses a no-replace hard-link step. On FAT/exFAT, which do not support hard links, the implementation performs a second existence check followed by a same-directory rename. Cancellation, network failure, HTTP failure, and write failure remove the temporary file.
+
+The PS5 build uses SceHttp for direct HTTP and HTTPS GET requests with certificate verification enabled for HTTPS. It does not send credentials, custom headers, cookies, or request bodies, and it intentionally does not follow redirects. Submit the final direct URL supplied by a trusted source. Failed downloads do not overwrite a destination; correct the URL or destination and submit a new job to retry.
+
+## Settings, jobs, progress, and cancellation
+
+Compression and archive worker values accept **Auto** or an integer from 1 to 8. The task view tracks one active filesystem job at a time to keep destination validation, disk use, and cancellation behavior predictable. Use the visible cancel control for a running task. Cancellation is cooperative: conversion checks between streamed work units, extraction checks upstream callbacks, and downloading checks between bounded response reads. A slow remote peer can delay downloader cancellation until its configured receive timeout returns.
+
+## FAQ and troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| No notification or browser page | Confirm the payload manager loaded the new ELF, then check its logs and whether the selected port is already occupied. Use the actual port printed by the startup notification. |
+| The Home Screen launcher is missing | The server can still be used from another device. Confirm the payload reached server readiness; launcher installation depends on the console’s runtime install permissions and needs hardware verification. |
+| No folders are shown | Refresh, inspect the readable roots reported by the UI/API, and browse a mounted path such as `/data` or `/mnt/usb0` only when it is actually present. Do not work around permissions with kernel patches. |
+| A conversion or extraction is rejected | Check that the source type is correct, the destination exists and is writable, the output name is unused, and sufficient space is available. |
+| A download fails | Use a direct URL without authentication or redirects, check console networking and free space, and retry as a new job. HTTPS certificate or TLS compatibility failures must not be bypassed. |
+| Cancellation takes time | It is cooperative by design. Wait for the task to report **Canceled** and verify that the temporary task output has been removed before reusing the name. |
+
+## Limitations
+
+PS5 hardware behavior, SceHttp TLS compatibility, filesystem permissions, launcher visibility, and long-running storage stability must be validated on the target console. The project has no hardware guarantee against CE-108262-9 or any other system error. Start with browsing only, then a tiny non-critical conversion or download, confirm the result, and only then use larger folders.
+
+Downloads are direct GET requests only. They do not support authenticated sources, cookies, custom headers, redirects, checksum manifests, resume, or concurrent transfers. Archive extraction supports only the formats and multipart patterns implemented by the bundled upstream decoder. This project does not support arbitrary archive formats.
+
+## Features
+
+- PS5-native web file browser with explicit source and destination workflows.
+- Actual-port startup notification and managed `FMGR88888` Home Screen launcher refresh.
+- Bounded-memory MkPFS conversion with deterministic serial or parallel PFSC output.
+- Native RAR and 7z extraction with password, multipart, progress, staging, and cooperative cancellation support.
+- Direct HTTP/HTTPS URL downloader with background jobs, bounded streaming I/O, temporary output, and no overwrite by default.
+- Traversal checks, no-follow cleanup, symlink safeguards, collision checks, and atomic/same-directory finalization.
+- English and Chinese UI strings with controller-focused navigation.
+
+## Building and testing
 
 ```sh
-make test-native
-make test-archive
-make mkpfs-pfsc mkpfs-wrap-exfat mkpfs-exfat mkpfs-convert-folder
+# Host build and core test coverage
+make linux test-native test-archive mkpfs-pfsc
+./tools/smoke_http.sh
+./tools/test_archive_http.sh
+make test-url-download
+
+# Upstream MkPFS format verification
 make compat-upstream MKPFS_UPSTREAM_ROOT=/path/to/MkPFS
-make linux
-```
 
-Direct conversion from a folder is:
+# Reproducible small-file benchmark
+./tools/benchmark_small_files.sh
 
-```sh
-./tools/mkpfs-convert-folder SOURCE_DIR DEST_DIR OUTPUT.ffpfsc [WORKERS|auto]
-```
+# Available memory and HTTP robustness checks
+./audit-memory-safety.sh
+python3 audit-filesystem-api-safety.py
+python3 audit-http-robustness.py
 
-The direct exFAT stage is:
-
-```sh
-./tools/mkpfs-exfat SOURCE_DIR OUTPUT.exfat
-```
-
-The upstream MkPFS verifier can check a generated `.ffpfsc`:
-
-```sh
-python3 -m mkpfs verify OUTPUT.ffpfsc
-```
-
-The repository’s `tests/test_folder_compat.sh` creates a real nested fixture and requires the upstream verifier to report `Warnings: 0` and `Errors: 0` when `MKPFS_UPSTREAM_ROOT` is set.
-
-## Verification status
-
-The complete host matrix passes. A nested real-folder fixture containing `sce_sys/param.json`, `eboot.bin`, and `sce_sys/subdir/readme.txt` generated a `.ffpfsc` that the upstream MkPFS verifier accepted with zero warnings and zero errors. Upstream tree inspection of the native raw exFAT stage shows the expected nested directory and file names. The benchmark is documented in [BENCHMARKS.md](BENCHMARKS.md).
-
-The benchmark is a host smoke test, not a PS5 performance claim. In the final regression on the same sparse 256 MiB fixture, serial mode took 1.578249 seconds (162.21 MiB/s), four workers took 0.692410 seconds (369.72 MiB/s), and Auto mode took 0.622651 seconds (411.15 MiB/s). All three outputs were byte-identical and passed upstream verification with zero warnings and zero errors. The implementation is designed for bounded memory and streaming, but 50–100 GiB target measurements require a suitable storage and target environment.
-
-The dedicated small-file benchmark compares the revision before the padding and single-worker queue changes (`d36b83f`) with the current serializer. Five alternating serial conversions of 4,000 deterministic 64-byte files averaged 1.264 seconds before and 1.098 seconds after, a 13.13% host-side improvement. The outputs compared byte-for-byte. Run `./tools/benchmark_small_files.sh` to reproduce this workload; its result is not a PS5 hardware performance claim.
-
-## PS5 build status
-
-The target build is verified with the public `ps5-payload-dev/sdk` checkout after performing its documented install into a real SDK prefix and building target-compatible dependencies:
-
-```sh
-make DESTDIR=/path/to/ps5-payload-sdk install
+# PS5 target build after staging the SDK and target dependencies
 export PS5_PAYLOAD_SDK=/path/to/ps5-payload-sdk
 make
 ```
 
-The original checkout was source-only and lacked `target/include` and `target/lib`; its `include/freebsd/ctype.h` was therefore outside the wrapper’s expected sysroot. The documented SDK install generated the target headers, CRT objects, linker scripts, libc, pthread library, and SCE stub libraries. Target zlib 1.3.1 and libmicrohttpd were then built into the target homebrew prefix. The resulting `web-file-mgr.elf` is a stripped x86-64 PS5 payload ELF with no unresolved symbols and the expected `.sprx` dependencies.
+Run `make test-archive` with host archive tools installed for real single-volume, password-protected, and multipart RAR/7z fixtures. The generated PS5 ELF is `web-file-mgr.elf`.
 
-## Safety-sensitive runtime behavior
+## Credits and thanks
 
-On PS5, the HTTP/API behavior follows the upstream Web File Manager and does
-not require a browser-supplied token. The server still limits connections,
-request body size, and idle connection time; host builds retain the token gate
-for local security regression tests.
+This project is built on real upstream work. MkPFS conversion compatibility follows [PSBrew/MkPFS][mkpfs]. The PS5 runtime architecture, web file manager behavior, storage roots, launcher flow, and file-management design originate from [owendswang/ps5-web-file-manager][web-file-manager]. RAR and 7z extraction is adapted from [bizkut/unrar-ps5][unrar-ps5] and its bundled [7-Zip][seven-zip] decoder. The HTTP server uses [GNU libmicrohttpd][microhttpd]. The payload build uses the [PS5 Payload SDK][sdk].
 
-Normal PS5 startup follows the upstream launcher flow: it checks for the
-managed `FMGR88888` application under `/user/app`, creates only missing
-metadata/icon files, and invokes the upstream PS5 application-install API.
-Existing launcher metadata, including unrelated title IDs, is never
-overwritten. Launcher metadata is generated from the port actually bound by
-the server. Set `WFM_PORT` to request a specific port, or leave it unset to
-let the OS select one. The `/api/roots` diagnostic endpoint
-reports which of `/`, `/user/app`, `/data`, `/mnt`, USB, and extended-storage
-paths are readable; the UI uses it only when the root listing is empty to find
-a usable mounted storage root. Conversion rejects
-symlinked sources, traversal components, case-folding collisions, oversized
-metadata allocations, and implicit replacement of an existing output file.
+See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the project license, upstream licenses, notices, and attribution.
 
-## Licensing
+## Roadmap
 
-The project remains GPLv3-or-later. MkPFS is GPLv3-or-later, and libmicrohttpd is LGPL. Original notices and third-party attribution are preserved in [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The developer’s next project, **Windows on PS5**, is already prepared and will be publicly released when support reaches these goals: **$30 total support = release; $45 total support = completion and release within 10 days.** This is the developer’s stated release commitment.
+
+## Support and donations
+
+| Network | Address |
+| --- | --- |
+| TON | `UQD80q4Pm-9cYzMmfB8rbgRrJAqRxuAmrbGm4GqFEgtdFSLL` |
+| Polygon (POL) | `0x0dE5511076bc70F489B1139485BbC73cd96cdc04` |
+| Solana | `A4FWhkKrUgEW3vZvsT19Koh5tWVCVK1LGw1Xwf9LQRLF` |
+| TRON | `TAhUU9RiB5VrUZ4z3cHYvnsGampig5aaEm` |
+
+If you would like to donate using another cryptocurrency that is not listed here, please contact us through the project’s issue/contact section so we can add it. If you encounter any problem with a donation address or transaction, please report it there as well.
+
+[mkpfs]: https://github.com/PSBrew/MkPFS "PSBrew MkPFS"
+[web-file-manager]: https://github.com/owendswang/ps5-web-file-manager "owendswang PS5 Web File Manager"
+[unrar-ps5]: https://github.com/bizkut/unrar-ps5 "bizkut unrar-ps5"
+[seven-zip]: https://www.7-zip.org/ "7-Zip"
+[microhttpd]: https://www.gnu.org/software/libmicrohttpd/ "GNU libmicrohttpd"
+[sdk]: https://github.com/ps5-payload-dev/sdk "PS5 Payload SDK"

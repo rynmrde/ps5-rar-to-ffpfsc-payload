@@ -14,5 +14,7 @@ This project is distributed under GPLv3-or-later and retains the notices from th
 | etaHEN reference | https://github.com/LightningMods/etaHEN | GPLv3. |
 | ezremote reference | https://github.com/cy33hc/ps5-ezremote-client | GPLv2. |
 | Native RAR and 7z extraction | https://github.com/bizkut/unrar-ps5 | Vendored source and upstream notices retained in `third_party/unrar-ps5`; see its `src/license.txt`, `src/acknow.txt`, and `lzma2601` notices. |
+| 7-Zip decoder | https://www.7-zip.org/ | Included by the vendored `unrar-ps5` source under its retained `lzma2601` notices. |
+| PS5 SceHttp client | https://github.com/ps5-payload-dev/sdk | PS5 system import library used only by the URL downloader target build; the SDK distribution and Sony platform terms apply. |
 
 No Python runtime, shell command execution, or Linux utility is used by the native payload on PS5. The MkPFS Python source remains a reference implementation and is not invoked by the payload.

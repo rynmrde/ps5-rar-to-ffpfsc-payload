@@ -1723,7 +1723,7 @@ archive_progress(unsigned int percent, const char *current, void *opaque) {
   }
 }
 
-static void *
+void *
 task_worker(void *arg) {
   file_task_t *task = arg;
   unsigned long long total = 0;
@@ -1806,6 +1806,9 @@ task_worker(void *arg) {
       errno = EIO;
       ret = EIO;
     }
+  }
+  if(task->op == TASK_URL_DOWNLOAD) {
+    ret = url_download_task_run(task);
   }
   if(task->op == TASK_COPY || task->op == TASK_MOVE) {
     char error[160] = {0};
@@ -1961,7 +1964,8 @@ task_worker(void *arg) {
   } else {
     time_t completed_at = time(NULL);
     pthread_mutex_lock(&g_tasks_lock);
-    if (task->op == TASK_CONVERT || task->op == TASK_EXTRACT)
+    if (task->op == TASK_CONVERT || task->op == TASK_EXTRACT ||
+        task->op == TASK_URL_DOWNLOAD)
       snprintf(task->current, sizeof(task->current), "%s", task->dst);
     task->state = TASK_DONE;
     if(task->total) {
@@ -2738,7 +2742,8 @@ api_install_pkg(struct MHD_Connection *conn, const char *body,
 enum MHD_Result
 filemgr_api_request(struct MHD_Connection *conn, const char *url,
                     const char *method, const char *body, size_t body_size) {
-  if((!strcmp(url, "/api/convert") || !strcmp(url, "/api/extract") || !strcmp(url, "/api/cancel") ||
+  if((!strcmp(url, "/api/convert") || !strcmp(url, "/api/extract") ||
+      !strcmp(url, "/api/url-download") || !strcmp(url, "/api/cancel") ||
       !strcmp(url, "/api/exit") || !strcmp(url, "/api/copy") ||
       !strcmp(url, "/api/move") || !strcmp(url, "/api/delete") ||
       !strcmp(url, "/api/upload/prepare") ||
@@ -2757,6 +2762,9 @@ filemgr_api_request(struct MHD_Connection *conn, const char *url,
   }
   if(!strcmp(url, "/api/extract")) {
     return strcmp(method, MHD_HTTP_METHOD_POST) ? send_json_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED, "invalid method") : api_extract(conn);
+  }
+  if(!strcmp(url, "/api/url-download")) {
+    return strcmp(method, MHD_HTTP_METHOD_POST) ? send_json_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED, "invalid method") : api_url_download(conn);
   }
   if(!strcmp(url, "/api/space")) return api_space(conn);
   if(!strcmp(url, "/api/cancel")) return api_cancel(conn);

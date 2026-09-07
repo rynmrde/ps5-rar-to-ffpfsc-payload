@@ -21,15 +21,19 @@ clang++-18 -x c $SAN -o audit-bin/test_archive_extract_asan tests/test_archive_e
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
   ARCHIVE_TEST_BIN="$repo/audit-bin/test_archive_extract_asan" ./tests/test_archive_extract.sh
 clang++-18 -x c $SAN $(pkg-config --cflags libmicrohttpd) \
-  -DVERSION_TAG='"v0.3.0"' -DTITLE_ID='"FMGR88888"' \
+  -DVERSION_TAG='"v0.3.1"' -DTITLE_ID='"FMGR88888"' \
   -o audit-bin/web-file-mgr-linux_asan \
   src/main.c src/websrv.c src/filemgr.c src/file_response.c src/task.c src/upload.c \
-  src/download.c src/text.c src/list.c src/space.c src/fs_util.c src/json_util.c \
+  src/download.c src/url_download.c src/text.c src/list.c src/space.c src/fs_util.c src/json_util.c \
   src/path_util.c src/asset.c src/mime.c src/notify.c src/pkg_installer.c src/pkg_info.c \
   src/mkpfs_native.c gen/*.c -x none -Wl,--whole-archive third_party/unrar-ps5/libmkpfsarchive.a -Wl,--no-whole-archive \
   $(pkg-config --libs libmicrohttpd) -pthread -lz -lstdc++
 WFM_PORT=18080 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
   python3 ./audit-http-robustness.py ./audit-bin/web-file-mgr-linux_asan ./audit-logs/http-asan.log
+
+WFM_SERVER_BIN="$repo/audit-bin/web-file-mgr-linux_asan" WFM_PORT=18084 \
+  ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+  ./tools/test_url_download_http.sh
 
 printf '%s\n' '== Standard HTTP conversion smoke =='
 WFM_PORT=18080 ./tools/smoke_http.sh

@@ -35,7 +35,7 @@ let uploadXhr = null;
 let uploadTerminalAbort = false;
 let L = {};
 
-const APP_VERSION = "v0.3.0";
+const APP_VERSION = "v0.3.1";
 const LAST_PATH_KEY = "ps5-web-file-mgr:last-path";
 const SORT_KEY = "ps5-web-file-mgr:list-sort";
 const LOADING_DISPLAY_DELAY = 250;
@@ -67,6 +67,7 @@ const pasteTargetTextEl = document.getElementById("pasteTargetText");
 const installPkgBtn = document.getElementById("installPkgBtn");
 const clearClipboardBtn = document.getElementById("clearClipboardBtn");
 const downloadBtn = document.getElementById("downloadBtn");
+const urlDownloadBtn = document.getElementById("urlDownloadBtn");
 const uploadMenuEl = document.getElementById("uploadMenu");
 const uploadBtn = document.getElementById("uploadBtn");
 const uploadMenuBtn = document.getElementById("uploadMenuBtn");
@@ -438,11 +439,11 @@ function taskElapsed(task) {
 }
 
 function opLabel(op) {
-  return { copy: t("copy"), move: t("move"), delete: t("delete"), chmod: t("permissionsTitle"), download: t("download"), upload: t("upload"), convert: t("convertFolder"), extract: t("extractArchive"), pkg_install: t("installPackage") }[op] || op;
+  return { copy: t("copy"), move: t("move"), delete: t("delete"), chmod: t("permissionsTitle"), download: t("download"), url_download: t("downloadUrl"), upload: t("upload"), convert: t("convertFolder"), extract: t("extractArchive"), pkg_install: t("installPackage") }[op] || op;
 }
 
 function taskOpLabel(op) {
-  return { copy: t("copying"), move: t("moving"), delete: t("deleting"), chmod: t("changingPermissions"), download: t("downloading"), upload: t("uploading"), convert: t("converting"), extract: t("extracting"), pkg_install: t("installPackage") }[op] || op;
+  return { copy: t("copying"), move: t("moving"), delete: t("deleting"), chmod: t("changingPermissions"), download: t("downloading"), url_download: t("downloading"), upload: t("uploading"), convert: t("converting"), extract: t("extracting"), pkg_install: t("installPackage") }[op] || op;
 }
 
 function isPlayStationBrowser() {
@@ -1295,6 +1296,7 @@ function updateButtons() {
   document.getElementById("renameBtn").disabled = locked || items.length !== 1;
   document.getElementById("deleteBtn").disabled = locked || items.length === 0;
   downloadBtn.disabled = locked || items.length === 0;
+  if (urlDownloadBtn) urlDownloadBtn.disabled = locked;
   document.getElementById("refreshBtn").disabled = locked;
   uploadBtn.disabled = locked;
   uploadMenuBtn.disabled = locked;
@@ -2269,6 +2271,37 @@ function archiveOutputFolder(name) {
     .replace(/\.(rar|r[0-9][0-9]|7z)$/i, "") + "-extracted";
 }
 
+function urlDownloadFilename(url) {
+  const clean = String(url || "").split(/[?#]/, 1)[0];
+  const candidate = clean.slice(clean.lastIndexOf("/") + 1);
+  if (!candidate || candidate.length > 255 || /[\\/\x00-\x1f]/.test(candidate)) return "download.bin";
+  try {
+    const decoded = decodeURIComponent(candidate);
+    return decoded && !/[\\/\x00-\x1f]/.test(decoded) ? decoded : "download.bin";
+  } catch (err) {
+    return "download.bin";
+  }
+}
+
+async function actionUrlDownload() {
+  if (busy || loadingPath) return;
+  const url = (prompt(t("downloadUrlPrompt"), "https://") || "").trim();
+  if (!url) return;
+  const destination = (prompt(t("downloadDestinationPrompt"), cwd) || "").trim();
+  if (!destination) return;
+  const name = (prompt(t("downloadNamePrompt"), urlDownloadFilename(url)) || "").trim();
+  if (!name) return;
+  try {
+    const data = await api("/api/url-download", { url, destination, name });
+    trackTask(data.task_id, "url_download", false);
+    setStatus(t("urlDownloadStarted"));
+    await pollTasks();
+  } catch (err) {
+    setBusy(false);
+    showActionFailed(t("downloadUrl"), err.message);
+  }
+}
+
 async function actionExtractArchive() {
   if (busy || loadingPath) return;
   const archive = singleSelected();
@@ -2328,6 +2361,7 @@ installPkgBtn.addEventListener("click", actionInstallSelectedPkgs);
 clearClipboardBtn.addEventListener("click", clearClipboard);
 document.getElementById("renameBtn").addEventListener("click", actionRename);
 downloadBtn.addEventListener("click", actionDownload);
+if (urlDownloadBtn) urlDownloadBtn.addEventListener("click", actionUrlDownload);
 document.getElementById("deleteBtn").addEventListener("click", actionDelete);
 uploadBtn.addEventListener("click", actionUploadFiles);
 uploadMenuBtn.addEventListener("click", toggleUploadMenu);

@@ -16,6 +16,7 @@ typedef enum task_op {
   TASK_DELETE,
   TASK_CHMOD,
   TASK_DOWNLOAD,
+  TASK_URL_DOWNLOAD,
   TASK_UPLOAD,
   TASK_CONVERT,
   TASK_EXTRACT,
@@ -90,6 +91,7 @@ int task_cancel_requested(file_task_t *task);
 file_task_t *find_task_locked(unsigned long id);
 void task_update(file_task_t *task, task_state_t state, const char *current,
                  unsigned long long add_done, const char *error);
+void *task_worker(void *arg);
 void record_task_completion_locked(file_task_t *task, time_t completed_at);
 
 enum MHD_Result send_json_ok(struct MHD_Connection *conn);
@@ -128,6 +130,8 @@ enum MHD_Result api_upload_finish(struct MHD_Connection *conn);
 enum MHD_Result api_download_prepare(struct MHD_Connection *conn,
                                      const char *body, size_t body_size);
 enum MHD_Result api_download(struct MHD_Connection *conn);
+enum MHD_Result api_url_download(struct MHD_Connection *conn);
+int url_download_task_run(file_task_t *task);
 enum MHD_Result api_list(struct MHD_Connection *conn);
 enum MHD_Result api_space(struct MHD_Connection *conn);
 enum MHD_Result api_text(struct MHD_Connection *conn);

@@ -1,4 +1,4 @@
-ifneq ($(filter-out linux linux-deps test-native test-archive archive-lib mkpfs-pfsc mkpfs-wrap-exfat mkpfs-exfat mkpfs-convert-folder compat-upstream clean,$(MAKECMDGOALS)),)
+ifneq ($(filter-out linux linux-deps test-native test-archive test-url-download archive-lib mkpfs-pfsc mkpfs-wrap-exfat mkpfs-exfat mkpfs-convert-folder compat-upstream clean,$(MAKECMDGOALS)),)
   ifdef PS5_PAYLOAD_SDK
     include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
   else
@@ -13,7 +13,7 @@ ifeq ($(MAKECMDGOALS),)
   endif
 endif
 
-VERSION_TAG := v0.3.0
+VERSION_TAG := v0.3.1
 TITLE_ID    := FMGR88888
 PYTHON      ?= python3
 STRIP       ?= $(PS5_PAYLOAD_SDK)/bin/prospero-strip
@@ -25,7 +25,7 @@ HOST_PKG_CONFIG ?= pkg-config
 
 BIN        := web-file-mgr.elf
 LINUX_BIN  := web-file-mgr-linux
-COMMON_SRCS := src/main.c src/websrv.c src/filemgr.c src/file_response.c src/task.c src/upload.c src/download.c src/text.c src/list.c src/space.c src/fs_util.c src/json_util.c src/path_util.c src/asset.c src/mime.c src/notify.c src/pkg_installer.c src/pkg_info.c src/mkpfs_native.c
+COMMON_SRCS := src/main.c src/websrv.c src/filemgr.c src/file_response.c src/task.c src/upload.c src/download.c src/url_download.c src/text.c src/list.c src/space.c src/fs_util.c src/json_util.c src/path_util.c src/asset.c src/mime.c src/notify.c src/pkg_installer.c src/pkg_info.c src/mkpfs_native.c
 PS5_SRCS    := $(COMMON_SRCS) src/app_installer.c
 LINUX_SRCS  := $(COMMON_SRCS)
 ARCHIVE_DIR := third_party/unrar-ps5
@@ -42,12 +42,12 @@ CFLAGS := -Oz -fno-asynchronous-unwind-tables -fno-unwind-tables -Wall -Werror -
 CFLAGS += `$(PKG_CONFIG) libmicrohttpd --cflags`
 LDFLAGS := -Wl,--gc-sections
 LDADD  := `$(PKG_CONFIG) libmicrohttpd --libs`
-LDADD  += -lSceIpmi -lSceAppInstUtil -lSceUserService -lz
+LDADD  += -lSceIpmi -lSceAppInstUtil -lSceUserService -lSceHttp -lz
 LINUX_CFLAGS := -O2 -flto -Wall -Werror -Isrc -DVERSION_TAG=\"$(VERSION_TAG)\" -DTITLE_ID=\"$(TITLE_ID)\"
 LINUX_CFLAGS += `$(HOST_PKG_CONFIG) libmicrohttpd --cflags`
 LINUX_LDADD := `$(HOST_PKG_CONFIG) libmicrohttpd --libs` -pthread -lz -lstdc++
 
-.PHONY: all linux test-native test-archive mkpfs-pfsc mkpfs-wrap-exfat mkpfs-exfat mkpfs-convert-folder compat-upstream deps linux-deps archive-lib clean
+.PHONY: all linux test-native test-archive test-url-download mkpfs-pfsc mkpfs-wrap-exfat mkpfs-exfat mkpfs-convert-folder compat-upstream deps linux-deps archive-lib clean
 
 all: deps $(BIN)
 
@@ -62,6 +62,9 @@ test-native: tests/test_mkpfs_native
 
 test-archive: tests/test_archive_extract
 	./tests/test_archive_extract.sh
+
+test-url-download: linux
+	./tools/test_url_download_http.sh
 
 mkpfs-pfsc: tools/mkpfs-pfsc
 
