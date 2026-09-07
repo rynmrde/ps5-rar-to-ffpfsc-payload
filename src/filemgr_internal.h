@@ -18,6 +18,7 @@ typedef enum task_op {
   TASK_DOWNLOAD,
   TASK_UPLOAD,
   TASK_CONVERT,
+  TASK_EXTRACT,
   TASK_PKG_INSTALL,
 } task_op_t;
 
@@ -45,6 +46,7 @@ typedef struct file_task {
   char error_code[64];
   char error_arg[PATH_MAX + 96];
   char conversion_name[NAME_MAX];
+  char archive_password[256];
   char **srcs;
   size_t src_count;
   size_t file_count;

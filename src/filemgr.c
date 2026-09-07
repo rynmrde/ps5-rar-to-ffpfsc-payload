@@ -21,6 +21,7 @@
 #endif
 
 #include "filemgr_internal.h"
+#include "archive_extract.h"
 #include "mkpfs_native.h"
 #include "json_util.h"
 #include "path_util.h"
@@ -1477,6 +1478,37 @@ remove_path(file_task_t *task, const char *path) {
   return unlink(path);
 }
 
+/* Archive output is written only inside a unique, task-owned staging
+ * directory.  This cleanup deliberately uses lstat, so an archive-supplied
+ * symlink is unlinked rather than followed, even after cancellation. */
+static int
+remove_staging_tree(const char *path) {
+  struct stat st;
+
+  if(lstat(path, &st)) {
+    return errno == ENOENT ? 0 : -1;
+  }
+  if(S_ISDIR(st.st_mode)) {
+    DIR *dir = opendir(path);
+    struct dirent *entry;
+    int ret = 0;
+    if(!dir) return -1;
+    while((entry = readdir(dir))) {
+      char child[PATH_MAX];
+      if(!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+      if(path_join(child, sizeof(child), path, entry->d_name) ||
+         remove_staging_tree(child)) {
+        ret = -1;
+        break;
+      }
+    }
+    closedir(dir);
+    if(!ret && rmdir(path)) ret = -1;
+    return ret;
+  }
+  return unlink(path);
+}
+
 static int
 resolve_destination(const char *src, const char *dst, char *out, size_t size) {
   struct stat st;
@@ -1675,6 +1707,22 @@ static int conversion_progress(uint64_t done, uint64_t phase_total, const char *
   return task_cancel_requested(ctx->task);
 }
 
+typedef struct archive_progress_ctx {
+  file_task_t *task;
+  unsigned int last_percent;
+} archive_progress_ctx_t;
+
+static void
+archive_progress(unsigned int percent, const char *current, void *opaque) {
+  archive_progress_ctx_t *ctx = opaque;
+  unsigned int clamped = percent > 100 ? 100 : percent;
+  if(current) task_update(ctx->task, TASK_RUNNING, current, 0, NULL);
+  if(clamped > ctx->last_percent) {
+    task_update(ctx->task, TASK_RUNNING, NULL, clamped - ctx->last_percent, NULL);
+    ctx->last_percent = clamped;
+  }
+}
+
 static void *
 task_worker(void *arg) {
   file_task_t *task = arg;
@@ -1709,6 +1757,54 @@ task_worker(void *arg) {
       ret = mkpfs_convert_folder_progress(task->srcs[0], output_dir, output_name,
                                            &options, &task->cancel_requested,
                                            conversion_progress, &progress);
+    }
+  }
+  if(task->op == TASK_EXTRACT) {
+    char parent[PATH_MAX];
+    char staging[PATH_MAX];
+    char archive_error[160] = {0};
+    archive_progress_ctx_t progress = {.task = task, .last_percent = 0};
+    struct stat destination_st;
+
+    if(path_dirname(task->dst, parent, sizeof(parent)) ||
+       lstat(parent, &destination_st) || !S_ISDIR(destination_st.st_mode) ||
+       snprintf(staging, sizeof(staging), "%s/.mkpfs-extract-%lu.tmp", parent,
+                task->id) >= (int)sizeof(staging)) {
+      ret = EINVAL;
+    } else if(mkdir(staging, 0700)) {
+      ret = errno;
+    } else {
+      task_set_total(task, 100);
+      task_update(task, TASK_RUNNING, "extracting archive", 0, NULL);
+      ret = archive_extract_run(task->srcs[0], staging, task->archive_password,
+                                task->conversion_workers,
+                                (volatile int *)&task->cancel_requested,
+                                archive_progress, &progress, archive_error,
+                                sizeof(archive_error));
+      if(ret == 0 && !task_cancel_requested(task) && rename(staging, task->dst)) {
+        ret = errno;
+      }
+      if(ret != 0 || task_cancel_requested(task)) {
+        int cleanup_errno;
+        if(remove_staging_tree(staging)) {
+          cleanup_errno = errno;
+          if(!archive_error[0]) snprintf(archive_error, sizeof(archive_error),
+                                         "staging cleanup failed: %s",
+                                         strerror(cleanup_errno));
+        }
+      }
+      if(ret != 0 && archive_error[0]) {
+        task_set_error_code(task, "archive_extract_failed", task->srcs[0]);
+        task_update(task, TASK_RUNNING, task->srcs[0], 0, archive_error);
+      }
+    }
+    if(task_cancel_requested(task) && ret == 0) ret = ECANCELED;
+    if(ret == 255) {
+      errno = ECANCELED;
+      ret = ECANCELED;
+    } else if(ret > 0 && ret < 256) {
+      errno = EIO;
+      ret = EIO;
     }
   }
   if(task->op == TASK_COPY || task->op == TASK_MOVE) {
@@ -1860,12 +1956,13 @@ task_worker(void *arg) {
                             task->current[0] ? task->current : task->src);
       }
       task_update(task, TASK_FAILED, task->current[0] ? task->current : task->src,
-                  0, strerror(errno));
+                  0, task->error[0] ? task->error : strerror(errno));
     }
   } else {
     time_t completed_at = time(NULL);
     pthread_mutex_lock(&g_tasks_lock);
-    if (task->op == TASK_CONVERT) snprintf(task->current, sizeof(task->current), "%s", task->dst);
+    if (task->op == TASK_CONVERT || task->op == TASK_EXTRACT)
+      snprintf(task->current, sizeof(task->current), "%s", task->dst);
     task->state = TASK_DONE;
     if(task->total) {
       task->done = task->total;
@@ -2021,6 +2118,93 @@ api_convert(struct MHD_Connection *conn) {
 convert_error:
   free(source); free(destination); free(name); free(profile); free(workers_param); free(srcs); if (task) { free(task->srcs); free(task); }
   return send_json_error(conn, rc, rc == MHD_HTTP_INSUFFICIENT_STORAGE ? "insufficient storage" : "invalid conversion request");
+}
+
+static enum MHD_Result
+api_extract(struct MHD_Connection *conn) {
+  char *source = absolute_path_value(query_value(conn, "source"));
+  char *destination = absolute_path_value(query_value(conn, "destination"));
+  char *name = fs_path_value(query_value(conn, "name"));
+  char *password = query_value(conn, "password");
+  char *workers_param = query_value(conn, "workers");
+  struct stat source_st, destination_st, output_st;
+  unsigned long workers = 0;
+  unsigned long long available = 0;
+  char output[PATH_MAX];
+  file_task_t *task = NULL;
+  char **srcs = NULL;
+  strbuf_t b = {0};
+  int rc = MHD_HTTP_BAD_REQUEST;
+
+  if(workers_param && strcasecmp(workers_param, "auto")) workers = strtoul(workers_param, NULL, 10);
+  if(!source || !destination || !name || !relative_path_safe(name) || strchr(name, '/') ||
+     (password && strlen(password) >= sizeof(task->archive_password)) || workers > 8 ||
+     (workers_param && strcasecmp(workers_param, "auto") && workers == 0) ||
+     lstat(source, &source_st) || !S_ISREG(source_st.st_mode) ||
+     lstat(destination, &destination_st) || !S_ISDIR(destination_st.st_mode) ||
+     path_join(output, sizeof(output), destination, name)) {
+    goto extract_error;
+  }
+  if(lstat(output, &output_st) == 0 || errno != ENOENT) {
+    rc = MHD_HTTP_CONFLICT;
+    goto extract_error;
+  }
+  /* An archive can expand beyond its compressed size.  Preserve a generous
+   * reserve so an extraction cannot start on an almost-full destination. */
+  if(target_available_space(destination, &available) || available < 64ULL * 1024ULL * 1024ULL) {
+    rc = MHD_HTTP_INSUFFICIENT_STORAGE;
+    goto extract_error;
+  }
+  srcs = calloc(1, sizeof(*srcs));
+  task = calloc(1, sizeof(*task));
+  if(!srcs || !task) {
+    rc = MHD_HTTP_INTERNAL_SERVER_ERROR;
+    goto extract_error;
+  }
+  atomic_init(&task->cancel_requested, 0);
+  srcs[0] = source;
+  source = NULL;
+  task->srcs = srcs;
+  srcs = NULL;
+  task->src_count = 1;
+  task->op = TASK_EXTRACT;
+  task->state = TASK_QUEUED;
+  task->conversion_workers = (unsigned int)workers;
+  snprintf(task->src, sizeof(task->src), "%s", task->srcs[0]);
+  snprintf(task->dst, sizeof(task->dst), "%s", output);
+  if(password) snprintf(task->archive_password, sizeof(task->archive_password), "%s", password);
+  task->created_at = task->updated_at = time(NULL);
+  pthread_mutex_lock(&g_tasks_lock);
+  remove_finished_tasks_locked();
+  if(has_active_task_locked()) {
+    pthread_mutex_unlock(&g_tasks_lock);
+    rc = MHD_HTTP_CONFLICT;
+    goto extract_error;
+  }
+  task->id = g_next_task_id++;
+  task->next = g_tasks;
+  g_tasks = task;
+  pthread_mutex_unlock(&g_tasks_lock);
+  if(pthread_create(&task->thread, NULL, task_worker, task)) {
+    task_update(task, TASK_FAILED, NULL, 0, "pthread_create failed");
+  } else {
+    pthread_detach(task->thread);
+  }
+  strbuf_printf(&b, "{\"ok\":true,\"task_id\":%lu}", task->id);
+  free(destination); free(name); free(password); free(workers_param);
+  return send_buffer(conn, MHD_HTTP_OK, b.data, "application/json");
+
+extract_error:
+  free(source); free(destination); free(name); free(password); free(workers_param);
+  free(srcs);
+  if(task) {
+    free(task->srcs);
+    free(task);
+  }
+  return send_json_error(conn, rc,
+    rc == MHD_HTTP_INSUFFICIENT_STORAGE ? "insufficient storage" :
+    rc == MHD_HTTP_CONFLICT ? "destination exists or another task is running" :
+    "invalid extraction request");
 }
 
 static enum MHD_Result
@@ -2554,7 +2738,7 @@ api_install_pkg(struct MHD_Connection *conn, const char *body,
 enum MHD_Result
 filemgr_api_request(struct MHD_Connection *conn, const char *url,
                     const char *method, const char *body, size_t body_size) {
-  if((!strcmp(url, "/api/convert") || !strcmp(url, "/api/cancel") ||
+  if((!strcmp(url, "/api/convert") || !strcmp(url, "/api/extract") || !strcmp(url, "/api/cancel") ||
       !strcmp(url, "/api/exit") || !strcmp(url, "/api/copy") ||
       !strcmp(url, "/api/move") || !strcmp(url, "/api/delete") ||
       !strcmp(url, "/api/upload/prepare") ||
@@ -2570,6 +2754,9 @@ filemgr_api_request(struct MHD_Connection *conn, const char *url,
   if(!strcmp(url, "/api/tasks")) return api_tasks(conn);
   if(!strcmp(url, "/api/convert")) {
     return strcmp(method, MHD_HTTP_METHOD_POST) ? send_json_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED, "invalid method") : api_convert(conn);
+  }
+  if(!strcmp(url, "/api/extract")) {
+    return strcmp(method, MHD_HTTP_METHOD_POST) ? send_json_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED, "invalid method") : api_extract(conn);
   }
   if(!strcmp(url, "/api/space")) return api_space(conn);
   if(!strcmp(url, "/api/cancel")) return api_cancel(conn);

@@ -3,6 +3,14 @@
 *-linux
 /gen/
 /build/
+/audit-bin/
+/audit-logs/
+/tests/test_mkpfs_native
+/tests/test_archive_extract
+/tools/mkpfs-convert-folder
+/tools/mkpfs-exfat
+/tools/mkpfs-pfsc
+/tools/mkpfs-wrap-exfat
 *.o
 *.a
 *.so

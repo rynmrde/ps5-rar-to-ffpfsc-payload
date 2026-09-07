@@ -11,7 +11,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-repo = Path("/home/ubuntu/audits/mkpfs-ps5-upstream-review")
+repo = Path(__file__).resolve().parent
 binary = repo / "web-file-mgr-linux"
 token = "mkpfs-api-safety-token-012345678"
 port = int(os.environ.get("WFM_PORT", "18081"))

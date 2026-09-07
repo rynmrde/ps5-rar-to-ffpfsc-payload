@@ -256,7 +256,19 @@ int mkpfs_pack_pfsc_file_ex(const char *input_path, const char *output_path,
     pool.slots[i].compressed = (unsigned char *)malloc(compressBound(PFSC_BLOCK_SIZE));
     if (!pool.slots[i].raw || !pool.slots[i].compressed) { rc = ENOMEM; goto failed_pool; }
   }
-  for (int i = 0; i < pool.count; i++) if (pthread_create(&threads[i], NULL, pfsc_worker, &pool) != 0) { rc = EAGAIN; goto failed_pool; } else threads_started++;
+  /* A single requested worker must remain deterministic, but creating a
+     separate compression thread for every 64 KiB PFSC block adds a mutex and
+     condition-variable round trip.  Compress inline in that safe, bounded
+     case; multi-worker requests retain the established parallel queue. */
+  if (pool.count > 1) {
+    for (int i = 0; i < pool.count; i++) {
+      if (pthread_create(&threads[i], NULL, pfsc_worker, &pool) != 0) {
+        rc = EAGAIN;
+        goto failed_pool;
+      }
+      threads_started++;
+    }
+  }
   stored_pos = data_offset;
   uint64_t next_dispatch = 0, next_write = 0;
   while (next_write < block_count) {
@@ -265,21 +277,46 @@ int mkpfs_pack_pfsc_file_ex(const char *input_path, const char *output_path,
       memset(slot->raw, 0, PFSC_BLOCK_SIZE);
       if (fseeko(in, (off_t)(next_dispatch * PFSC_BLOCK_SIZE), SEEK_SET) != 0) { rc = EIO; goto failed_pool; }
       size_t got = fread(slot->raw, 1, PFSC_BLOCK_SIZE, in); if (ferror(in)) { rc = EIO; goto failed_pool; } (void)got;
-      pthread_mutex_lock(&pool.lock);
-      slot->index = next_dispatch; slot->compressed_size = 0; slot->error = 0; slot->claimed = 0; slot->done = 0; slot->pending = 1; next_dispatch++;
-      pthread_cond_signal(&pool.work); pthread_mutex_unlock(&pool.lock);
+      if (pool.count == 1) {
+        uLongf size = compressBound(PFSC_BLOCK_SIZE);
+        if (cancellation_requested(cancel_requested)) { rc = ECANCELED; goto failed_pool; }
+        slot->index = next_dispatch;
+        slot->compressed_size = 0;
+        slot->error = compress2(slot->compressed, &size, slot->raw,
+                                PFSC_BLOCK_SIZE, pool.compression_level) == Z_OK ? 0 : EIO;
+        slot->compressed_size = (size_t)size;
+        slot->done = 1;
+        slot->pending = 1;
+        next_dispatch++;
+      } else {
+        pthread_mutex_lock(&pool.lock);
+        slot->index = next_dispatch; slot->compressed_size = 0; slot->error = 0; slot->claimed = 0; slot->done = 0; slot->pending = 1; next_dispatch++;
+        pthread_cond_signal(&pool.work); pthread_mutex_unlock(&pool.lock);
+      }
     }
     if (cancellation_requested(cancel_requested)) { rc = ECANCELED; goto failed_pool; }
     pfsc_slot_t *slot = &pool.slots[next_write % (uint64_t)pool.count];
-    pthread_mutex_lock(&pool.lock);
-    while (!slot->done && !cancellation_requested(cancel_requested)) pthread_cond_wait(&pool.result, &pool.lock);
-    if (cancellation_requested(cancel_requested)) { pthread_mutex_unlock(&pool.lock); rc = ECANCELED; goto failed_pool; }
-    rc = slot->error; pthread_mutex_unlock(&pool.lock); if (rc) goto failed_pool;
+    if (pool.count == 1) {
+      if (cancellation_requested(cancel_requested)) { rc = ECANCELED; goto failed_pool; }
+      rc = slot->error;
+    } else {
+      pthread_mutex_lock(&pool.lock);
+      while (!slot->done && !cancellation_requested(cancel_requested)) pthread_cond_wait(&pool.result, &pool.lock);
+      if (cancellation_requested(cancel_requested)) { pthread_mutex_unlock(&pool.lock); rc = ECANCELED; goto failed_pool; }
+      rc = slot->error;
+      pthread_mutex_unlock(&pool.lock);
+    }
+    if (rc) goto failed_pool;
     offsets[next_write] = stored_pos;
     if (slot->compressed_size < PFSC_BLOCK_SIZE) { rc = write_all(out, slot->compressed, slot->compressed_size); stored_pos += slot->compressed_size; }
     else { rc = write_all(out, slot->raw, PFSC_BLOCK_SIZE); stored_pos += PFSC_BLOCK_SIZE; }
     if (rc) goto failed_pool;
-    pthread_mutex_lock(&pool.lock); slot->pending = 0; slot->done = 0; pthread_mutex_unlock(&pool.lock);
+    if (pool.count == 1) {
+      slot->pending = 0;
+      slot->done = 0;
+    } else {
+      pthread_mutex_lock(&pool.lock); slot->pending = 0; slot->done = 0; pthread_mutex_unlock(&pool.lock);
+    }
     next_write++;
     if (progress && progress(next_write * PFSC_BLOCK_SIZE > (uint64_t)st.st_size ? (uint64_t)st.st_size : next_write * PFSC_BLOCK_SIZE, (uint64_t)st.st_size, "compress", input_path, opaque)) { rc = ECANCELED; goto failed_pool; }
   }
@@ -617,6 +654,7 @@ static size_t exfat_file_entry_set(unsigned char *out, size_t capacity, const ex
 
 static int exfat_write_directory(FILE *out, const exfat_node_t *node, int root, uint32_t bitmap_clusters, uint32_t upcase_clusters, uint32_t cluster_count, uint32_t heap_offset) {
   uint64_t capacity = (uint64_t)node->cluster_count * 65536u;
+  (void)upcase_clusters;
   uint64_t used = 0;
   uint64_t offset;
   unsigned char special[96];

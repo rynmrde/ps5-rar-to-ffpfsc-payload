@@ -35,7 +35,7 @@ let uploadXhr = null;
 let uploadTerminalAbort = false;
 let L = {};
 
-const APP_VERSION = "v1.7";
+const APP_VERSION = "v0.3.0";
 const LAST_PATH_KEY = "ps5-web-file-mgr:last-path";
 const SORT_KEY = "ps5-web-file-mgr:list-sort";
 const LOADING_DISPLAY_DELAY = 250;
@@ -83,6 +83,7 @@ const textEditorCloseBtn = document.getElementById("textEditorCloseBtn");
 const textEditorSaveBtn = document.getElementById("textEditorSaveBtn");
 const newTextBtn = document.getElementById("newTextBtn");
 const convertBtn = document.getElementById("convertBtn");
+const extractBtn = document.getElementById("extractBtn");
 const imagePreviewOverlayEl = document.getElementById("imagePreviewOverlay");
 const imagePreviewNameEl = document.getElementById("imagePreviewName");
 const imagePreviewEl = document.getElementById("imagePreview");
@@ -437,11 +438,11 @@ function taskElapsed(task) {
 }
 
 function opLabel(op) {
-  return { copy: t("copy"), move: t("move"), delete: t("delete"), chmod: t("permissionsTitle"), download: t("download"), upload: t("upload"), pkg_install: t("installPackage") }[op] || op;
+  return { copy: t("copy"), move: t("move"), delete: t("delete"), chmod: t("permissionsTitle"), download: t("download"), upload: t("upload"), convert: t("convertFolder"), extract: t("extractArchive"), pkg_install: t("installPackage") }[op] || op;
 }
 
 function taskOpLabel(op) {
-  return { copy: t("copying"), move: t("moving"), delete: t("deleting"), chmod: t("changingPermissions"), download: t("downloading"), upload: t("uploading"), pkg_install: t("installPackage") }[op] || op;
+  return { copy: t("copying"), move: t("moving"), delete: t("deleting"), chmod: t("changingPermissions"), download: t("downloading"), upload: t("uploading"), convert: t("converting"), extract: t("extracting"), pkg_install: t("installPackage") }[op] || op;
 }
 
 function isPlayStationBrowser() {
@@ -1303,6 +1304,10 @@ function updateButtons() {
   if (convertBtn) {
     const convertItems = selectedEntries();
     convertBtn.disabled = locked || convertItems.length !== 1 || convertItems[0].type !== "d";
+  }
+  if (extractBtn) {
+    const archive = singleSelected();
+    extractBtn.disabled = locked || !archive || archive.type !== "f" || !isExtractableArchive(archive);
   }
   for (const button of filesEl.querySelectorAll(".row-action, .mode-action")) button.disabled = locked;
   for (const checkbox of filesEl.querySelectorAll(".select-cell input")) checkbox.disabled = locked;
@@ -2253,6 +2258,42 @@ function actionExit() {
 }
 
 document.getElementById("refreshBtn").addEventListener("click", () => load(cwd, false));
+
+function isExtractableArchive(item) {
+  return /\.(rar|r[0-9][0-9]|7z|7z\.001)$/i.test(item.name || "");
+}
+
+function archiveOutputFolder(name) {
+  return (name || "archive")
+    .replace(/\.7z\.001$/i, "")
+    .replace(/\.(rar|r[0-9][0-9]|7z)$/i, "") + "-extracted";
+}
+
+async function actionExtractArchive() {
+  if (busy || loadingPath) return;
+  const archive = singleSelected();
+  if (!archive || archive.type !== "f" || !isExtractableArchive(archive)) return;
+  const destination = (prompt(t("extractDestinationPrompt"), cwd) || "").trim();
+  if (!destination) return;
+  const name = (prompt(t("extractNamePrompt"), archiveOutputFolder(archive.name)) || "").trim();
+  if (!name) return;
+  const password = prompt(t("extractPasswordPrompt"), "");
+  if (password === null) return;
+  let workers = (prompt(t("extractWorkersPrompt"), "auto") || "auto").trim();
+  if (!/^auto$|^[1-8]$/i.test(workers)) workers = "auto";
+  try {
+    const data = await api("/api/extract", {
+      source: archive.path, destination, name, password, workers
+    });
+    trackTask(data.task_id, "extract", true);
+    setStatus(t("extractStarted"));
+    await pollTasks();
+  } catch (err) {
+    setBusy(false);
+    showActionFailed(t("extractArchive"), err.message);
+  }
+}
+
 async function actionConvertFolder() {
   if (busy || loadingPath) return;
   const items = selectedEntries();
@@ -2299,6 +2340,7 @@ textEditorCloseBtn.addEventListener("click", requestCloseTextEditor);
 textEditorSaveBtn.addEventListener("click", saveTextEditor);
 newTextBtn.addEventListener("click", actionNewText);
 if (convertBtn) convertBtn.addEventListener("click", actionConvertFolder);
+if (extractBtn) extractBtn.addEventListener("click", actionExtractArchive);
 imagePreviewCloseBtn.addEventListener("click", closeImagePreview);
 pkgInfoCloseBtn.addEventListener("click", closePkgInfo);
 pkgInfoInstallBtn.addEventListener("click", installPkgFromInfo);
@@ -2439,6 +2481,37 @@ contentEl.addEventListener("scroll", () => {
   hoverResumeTimer = setTimeout(() => {
     hoverPaused = false;
   }, 160);
+});
+
+/* PS5 browser D-pad navigation is exposed as keyboard arrows.  Keep native
+ * button activation intact while making the file list usable without touch. */
+document.addEventListener("keydown", event => {
+  const target = event.target;
+  if (target && /^(INPUT|TEXTAREA|SELECT)$/i.test(target.tagName)) return;
+  if (event.key === "F5") {
+    event.preventDefault();
+    if (!busy && !loadingPath) load(cwd, false);
+    return;
+  }
+  if (event.key === "Backspace" || (event.altKey && event.key === "ArrowUp")) {
+    if (!busy && !loadingPath && cwd !== "/") {
+      event.preventDefault();
+      actionParentDirectory();
+    }
+    return;
+  }
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+  const row = findRowFromTarget(target);
+  if (!row) return;
+  const rows = Array.from(filesEl.querySelectorAll("tr"));
+  const index = rows.indexOf(row);
+  const next = rows[index + (event.key === "ArrowDown" ? 1 : -1)];
+  if (!next) return;
+  const control = next.querySelector(".row-action") || next.querySelector("input, button");
+  if (control) {
+    event.preventDefault();
+    control.focus();
+  }
 });
 
 async function init() {

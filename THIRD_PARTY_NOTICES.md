@@ -13,5 +13,6 @@ This project is distributed under GPLv3-or-later and retains the notices from th
 | ps5-payload-manager reference | https://github.com/itsPLK/ps5-payload-manager | GPLv3. |
 | etaHEN reference | https://github.com/LightningMods/etaHEN | GPLv3. |
 | ezremote reference | https://github.com/cy33hc/ps5-ezremote-client | GPLv2. |
+| Native RAR and 7z extraction | https://github.com/bizkut/unrar-ps5 | Vendored source and upstream notices retained in `third_party/unrar-ps5`; see its `src/license.txt`, `src/acknow.txt`, and `lzma2601` notices. |
 
-No Python runtime, shell command execution, or Linux utility is used by the native foundation on PS5. The MkPFS Python source remains a reference for the still-incomplete native serialization port and is not invoked by the payload.
+No Python runtime, shell command execution, or Linux utility is used by the native payload on PS5. The MkPFS Python source remains a reference implementation and is not invoked by the payload.

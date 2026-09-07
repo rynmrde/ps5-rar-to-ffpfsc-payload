@@ -16,10 +16,23 @@ The folder serializer uses bounded memory for directory entries and a 1 MiB file
 
 The UI has a **Convert folder** action. Select one folder in the existing file browser, navigate to the desired destination directory, choose the output filename and compression level, and start the conversion. The new `/api/convert` endpoint performs source/destination validation, title-safe filename validation, target-space preflight, task queuing, progress reporting, speed/ETA tracking through the existing task API, cancellation, and final output reporting. Completed conversion tasks appear in the existing task history and task overlay.
 
+### RAR and 7z extraction
+
+The native **Extract archive** toolbar action accepts a selected `.rar`, legacy `.rNN`, `.7z`, or first `.7z.001` volume. It prompts for the destination folder, output-folder name, optional password, and worker setting. The implementation vendors the extraction engine from [`bizkut/unrar-ps5`](https://github.com/bizkut/unrar-ps5), including its 7-Zip decoder. Both RAR and 7z extraction run as background tasks, report task status and progress, honor cooperative cancellation, and support the multipart conventions handled by that upstream implementation.
+
+Extraction writes only to a task-private `.mkpfs-extract-<task-id>.tmp` directory beneath the selected destination. The completed directory is published by a single rename only after a successful decoder result. Failure or cancellation removes that private tree without following archive-created symlinks. Existing output names are rejected rather than replaced. Archive member paths are constrained by the upstream decoder, RAR symlink extraction is disabled, and the source, destination, and output name undergo the same filesystem API validation as other file-manager tasks.
+
+The test suite creates real single-volume and multipart RAR and 7z archives. Run `make test-archive` for the native decoder coverage and `./tools/test_archive_http.sh` after `make linux` for HTTP task, task-state, collision, traversal, cancellation, and cleanup coverage.
+
+### PS5 browser and controller operation
+
+All toolbar actions remain ordinary focusable buttons, so they work with the PS5 browser controller as well as touch, mouse, and desktop keyboard input. The file rows have focusable name and selection controls. D-pad **Up** and **Down** move between file rows, **Cross/Enter** activates the focused control, **Backspace** or **Alt+Up** opens the parent directory, and **F5** refreshes the current directory. Selecting one folder enables conversion. Selecting one supported archive enables extraction. Destination selection is explicit in the extraction prompt; conversion writes to the directory currently displayed by the browser. Active progress, cancellation, terminal errors, and completed output paths remain available in the existing task overlay and history.
+
 The host-only tools are also available for reproducible testing:
 
 ```sh
 make test-native
+make test-archive
 make mkpfs-pfsc mkpfs-wrap-exfat mkpfs-exfat mkpfs-convert-folder
 make compat-upstream MKPFS_UPSTREAM_ROOT=/path/to/MkPFS
 make linux
@@ -51,6 +64,8 @@ The complete host matrix passes. A nested real-folder fixture containing `sce_sy
 
 The benchmark is a host smoke test, not a PS5 performance claim. In the final regression on the same sparse 256 MiB fixture, serial mode took 1.578249 seconds (162.21 MiB/s), four workers took 0.692410 seconds (369.72 MiB/s), and Auto mode took 0.622651 seconds (411.15 MiB/s). All three outputs were byte-identical and passed upstream verification with zero warnings and zero errors. The implementation is designed for bounded memory and streaming, but 50–100 GiB target measurements require a suitable storage and target environment.
 
+The dedicated small-file benchmark compares the revision before the padding and single-worker queue changes (`d36b83f`) with the current serializer. Five alternating serial conversions of 4,000 deterministic 64-byte files averaged 1.264 seconds before and 1.098 seconds after, a 13.13% host-side improvement. The outputs compared byte-for-byte. Run `./tools/benchmark_small_files.sh` to reproduce this workload; its result is not a PS5 hardware performance claim.
+
 ## PS5 build status
 
 The target build is verified with the public `ps5-payload-dev/sdk` checkout after performing its documented install into a real SDK prefix and building target-compatible dependencies:
@@ -61,7 +76,7 @@ export PS5_PAYLOAD_SDK=/path/to/ps5-payload-sdk
 make
 ```
 
-The original checkout was source-only and lacked `target/include` and `target/lib`; its `include/freebsd/ctype.h` was therefore outside the wrapper’s expected sysroot. The documented SDK install generated the target headers, CRT objects, linker scripts, libc, pthread library, and SCE stub libraries. Target zlib 1.3.1 and libmicrohttpd were then built into the target homebrew prefix. The resulting `web-file-mgr.elf` is a stripped x86-64 PS5 payload ELF with no unresolved symbols and the expected `.sprx` dependencies. It is packaged in the `v0.2.0-alpha.2` prerelease.
+The original checkout was source-only and lacked `target/include` and `target/lib`; its `include/freebsd/ctype.h` was therefore outside the wrapper’s expected sysroot. The documented SDK install generated the target headers, CRT objects, linker scripts, libc, pthread library, and SCE stub libraries. Target zlib 1.3.1 and libmicrohttpd were then built into the target homebrew prefix. The resulting `web-file-mgr.elf` is a stripped x86-64 PS5 payload ELF with no unresolved symbols and the expected `.sprx` dependencies.
 
 ## Safety-sensitive runtime behavior
 
