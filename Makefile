@@ -13,7 +13,7 @@ ifeq ($(MAKECMDGOALS),)
   endif
 endif
 
-VERSION_TAG := v0.3.2
+VERSION_TAG := v0.3.3
 TITLE_ID    := FMGR88888
 PYTHON      ?= python3
 STRIP       ?= $(PS5_PAYLOAD_SDK)/bin/prospero-strip
@@ -23,7 +23,8 @@ HOST_CXX    = c++
 HOST_STRIP  ?= strip
 HOST_PKG_CONFIG ?= pkg-config
 
-BIN        := web-file-mgr.elf
+BIN        := rar-to-ffpfsc-ps5-payload.elf
+LEGACY_BIN := web-file-mgr.elf
 LINUX_BIN  := web-file-mgr-linux
 COMMON_SRCS := src/main.c src/websrv.c src/filemgr.c src/file_response.c src/task.c src/upload.c src/download.c src/url_download.c src/text.c src/list.c src/space.c src/fs_util.c src/json_util.c src/path_util.c src/asset.c src/mime.c src/notify.c src/pkg_installer.c src/pkg_info.c src/mkpfs_native.c
 PS5_SRCS    := $(COMMON_SRCS) src/app_installer.c
@@ -89,7 +90,7 @@ gen:
 
 clean:
 	$(MAKE) -C $(ARCHIVE_DIR) clean
-	rm -rf $(BIN) $(LINUX_BIN) tests/test_mkpfs_native tests/test_archive_extract tools/mkpfs-pfsc tools/mkpfs-wrap-exfat tools/mkpfs-exfat tools/mkpfs-convert-folder gen
+	rm -rf $(BIN) $(LEGACY_BIN) $(LINUX_BIN) tests/test_mkpfs_native tests/test_archive_extract tools/mkpfs-pfsc tools/mkpfs-wrap-exfat tools/mkpfs-exfat tools/mkpfs-convert-folder gen
 
 gen/%.c: assets/% gen-asset-module.py | gen
 	$(PYTHON) gen-asset-module.py --path $* $< > $@

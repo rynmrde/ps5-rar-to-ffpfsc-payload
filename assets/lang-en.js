@@ -1,5 +1,5 @@
 window.WFM_LANG = {
-  appTitle: "PS5 Web File Manager",
+  appTitle: "RAR to FFPFSC PS5 Payload",
   copy: "Copy",
   move: "Move",
   delete: "Delete",

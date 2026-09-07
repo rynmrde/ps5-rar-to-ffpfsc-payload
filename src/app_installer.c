@@ -145,9 +145,9 @@ app_install_if_needed(unsigned short port) {
            "  \"deeplinkUri\": \"http://127.0.0.1:%u/\",\n"
            "  \"localizedParameters\": {\n"
            "    \"defaultLanguage\": \"en-US\",\n"
-           "    \"en-US\": {\"titleName\": \"Web File Manager\"},\n"
-           "    \"zh-Hans\": {\"titleName\": \"文件管理器网页\"},\n"
-           "    \"zh-Hant\": {\"titleName\": \"文件管理器网页\"}\n"
+           "    \"en-US\": {\"titleName\": \"RAR to FFPFSC PS5 Payload\"},\n"
+           "    \"zh-Hans\": {\"titleName\": \"RAR to FFPFSC PS5 Payload\"},\n"
+           "    \"zh-Hant\": {\"titleName\": \"RAR to FFPFSC PS5 Payload\"}\n"
            "  }\n}\n", title_id, (unsigned int)port);
 
   printf("Installing or refreshing launcher app %s on port %u\n",

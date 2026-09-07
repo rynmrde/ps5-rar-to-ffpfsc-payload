@@ -15,7 +15,7 @@ for i in $(seq 1 40); do
   if curl --compressed -fsS "http://127.0.0.1:$port/" >/tmp/mkpfs-http-index.html 2>/dev/null; then break; fi
   sleep 0.1
 done
-grep -q 'Web File Manager' /tmp/mkpfs-http-index.html
+grep -q 'RAR to FFPFSC PS5 Payload' /tmp/mkpfs-http-index.html
 queued=$(curl --compressed -fsS -H "X-WFM-Token: $token" -X POST "http://127.0.0.1:$port/api/convert?source=$(printf '%s' "$root/source" | sed 's|/|%2F|g')&destination=$(printf '%s' "$root/out" | sed 's|/|%2F|g')&name=HTTP.ffpfsc&profile=7&workers=4")
 printf '%s\n' "$queued"
 task_id=$(printf '%s' "$queued" | sed -n 's/.*"task_id":\([0-9][0-9]*\).*/\1/p')

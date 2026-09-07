@@ -16,7 +16,7 @@
 #include "notify.h"
 #include "websrv.h"
 
-#define PROCESS_NAME "web-file-mgr.elf"
+#define PROCESS_NAME "rar-to-ffpfsc-ps5-payload.elf"
 #define DEFAULT_PORT 6777
 
 static unsigned short
@@ -37,7 +37,7 @@ server_ready(unsigned short port, void *arg) {
   if(app_install_if_needed(port)) {
     fputs("launcher installation failed; server remains available\n", stderr);
   }
-  notify_user("Web File Manager\nVersion: %s\nPort: %u", VERSION_TAG, port);
+  notify_user("RAR to FFPFSC PS5 Payload\nVersion: %s\nPort: %u", VERSION_TAG, port);
 }
 #endif
 
