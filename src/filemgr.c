@@ -1692,11 +1692,28 @@ typedef struct conversion_progress_ctx {
 
 static int conversion_progress(uint64_t done, uint64_t phase_total, const char *phase, const char *current, void *opaque) {
   conversion_progress_ctx_t *ctx = opaque;
-  unsigned long long half = ctx->total / 2;
+  unsigned long long start = 0;
+  unsigned long long span = 0;
   unsigned long long target;
   if (!phase_total) phase_total = 1;
-  if (phase && !strcmp(phase, "exfat")) target = (unsigned long long)(((long double)done * (long double)half) / (long double)phase_total);
-  else target = half + (unsigned long long)(((long double)done * (long double)(ctx->total - half)) / (long double)phase_total);
+  if (phase && !strcmp(phase, "exfat")) {
+    start = 0;
+    span = ctx->total * 35u / 100u;
+  } else if (phase && !strcmp(phase, "compress")) {
+    start = ctx->total * 35u / 100u;
+    span = ctx->total * 45u / 100u;
+  } else if (phase && !strcmp(phase, "verify")) {
+    start = ctx->total * 80u / 100u;
+    span = ctx->total * 14u / 100u;
+  } else if (phase && (!strcmp(phase, "assemble") || !strcmp(phase, "publish"))) {
+    start = ctx->total * 94u / 100u;
+    span = ctx->total - start;
+  } else {
+    start = ctx->total * 35u / 100u;
+    span = ctx->total * 45u / 100u;
+  }
+  target = start + (unsigned long long)(((long double)done * (long double)span) /
+                                         (long double)phase_total);
   if (target > ctx->total) target = ctx->total;
   if (target > ctx->last) {
     task_update(ctx->task, TASK_RUNNING, current ? current : phase, target - ctx->last, NULL);

@@ -105,6 +105,8 @@ The converter scans and validates the source before creating an output file. It 
 
 The serializer passes the upstream MkPFS verifier on the project fixtures.[1] Serial and parallel conversion produced byte-identical output for the same test input and settings. The reproducible 4,000-file, 64-byte host benchmark measured a mean serial conversion time of **1.270 seconds before** and **1.146 seconds after** the small-file optimization, a **9.76% improvement**. This is a host benchmark, not a PS5 storage-performance claim.
 
+Finalization writes the PFSC stream directly inside the same-directory atomic PFS output and then performs the required full PFSC decompression/offset verification in place. It does not use a second full-size PFSC temporary file or a second full-file copy. On the reproducible 32,000-file compressible workload, median finalization time changed from **2.173 seconds to 1.973 seconds** (**9.22% faster**). On a 4,096-file, 64 KiB incompressible workload, where the physical final-output I/O is substantial, it changed from **0.300 seconds to 0.077 seconds** (**74.34% faster**). Each comparison used the recorded pre-optimization source, identical input and output name, and a byte-identity check; both optimized outputs passed the upstream verifier with zero warnings and zero errors. These are host measurements, not PS5 storage-performance claims.
+
 ## RAR/7z extraction and the RAR-to-FFPFSC workflow
 
 ### Supported archive workflow
@@ -197,6 +199,10 @@ make compat-upstream MKPFS_UPSTREAM_ROOT=/path/to/MkPFS
 
 # Reproducible 4,000-small-file benchmark
 ./tools/benchmark_small_files.sh
+
+# Reproducible 32,000-small-file finalization benchmark. It compiles the
+# recorded pre-optimization source, checks byte identity, and prints timings.
+make benchmark-finalization
 
 # Host-side memory, HTTP, and filesystem safety checks
 ./audit-memory-safety.sh

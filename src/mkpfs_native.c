@@ -24,6 +24,9 @@
 #define PFSC_OFFSETS_OFFSET 0x400u
 #define PFSC_INITIAL_DATA_OFFSET 0x10000u
 #define PFSC_MAX_OFFSETS_BYTES (64u * 1024u * 1024u)
+#define PFSC_PROGRESS_INTERVAL (4u * 1024u * 1024u)
+#define PFSC_OFFSET_WRITE_ENTRIES 8192u
+#define PFSC_VERIFY_OFFSET_WINDOW 4096u
 #define EXFAT_MAX_TREE_NODES 262144u
 #define EXFAT_MAX_TREE_DEPTH 128u
 
@@ -126,6 +129,12 @@ static int write_zeros(FILE *out, uint64_t count) {
   return 0;
 }
 
+static int write_buffer_flush(FILE *out, unsigned char *buffer, size_t *used) {
+  if (*used && write_all(out, buffer, *used)) return EIO;
+  *used = 0;
+  return 0;
+}
+
 static int cleanup_pack(FILE *in, FILE *out, const char *temp_path, int error) {
   if (in) (void)fclose(in);
   if (out) (void)fclose(out);
@@ -179,7 +188,6 @@ typedef struct pfsc_pool {
   pthread_cond_t result;
   pfsc_slot_t *slots;
   int compression_level;
-  int input_fd;
   const atomic_int *cancel_requested;
 } pfsc_pool_t;
 
@@ -217,15 +225,18 @@ static int pfsc_auto_workers(void) {
   return (int)n;
 }
 
-int mkpfs_pack_pfsc_file_ex(const char *input_path, const char *output_path,
-                            int compression_level, unsigned int requested_workers,
-                            const atomic_int *cancel_requested,
-                            mkpfs_progress_callback progress, void *opaque) {
-  struct stat st; FILE *in = NULL, *out = NULL; char temp_path[PATH_MAX];
-  uint64_t *offsets = NULL; uint64_t logical_size, block_count, offsets_bytes, data_offset, stored_pos; int rc = 0;
+static int pack_pfsc_into_stream(const char *input_path, FILE *out, uint64_t base_offset,
+                                 int compression_level, unsigned int requested_workers,
+                                 const atomic_int *cancel_requested,
+                                 mkpfs_progress_callback progress, void *opaque,
+                                 uint64_t *stored_size_out) {
+  struct stat st; FILE *in = NULL;
+  uint64_t *offsets = NULL; uint64_t logical_size, block_count, offsets_bytes, data_offset, stored_pos, last_reported = 0; int rc = 0;
   pfsc_pool_t pool = {0}; pthread_t *threads = NULL; int threads_started = 0;
   int pool_initialized = 0;
-  if (!input_path || !output_path || stat(input_path, &st) != 0) return errno;
+  unsigned char *write_buffer = NULL;
+  size_t write_buffer_used = 0;
+  if (!input_path || !out || stat(input_path, &st) != 0) return errno ? errno : EINVAL;
   if (!S_ISREG(st.st_mode) || compression_level < 0 || compression_level > 9) return EINVAL;
   logical_size = align_up_u64((uint64_t)st.st_size, PFSC_BLOCK_SIZE); if (!logical_size) logical_size = PFSC_BLOCK_SIZE;
   block_count = logical_size / PFSC_BLOCK_SIZE;
@@ -234,16 +245,18 @@ int mkpfs_pack_pfsc_file_ex(const char *input_path, const char *output_path,
   if (offsets_bytes > PFSC_MAX_OFFSETS_BYTES) return EFBIG;
   data_offset = align_up_u64(PFSC_OFFSETS_OFFSET + offsets_bytes, PFSC_INITIAL_DATA_OFFSET);
   in = fopen(input_path, "rb"); if (!in) return errno;
-  rc = open_secure_temp_file(output_path, "pfsc", temp_path, sizeof(temp_path), &out);
-  if (rc) return cleanup_pack(in, NULL, NULL, rc);
   offsets = (uint64_t *)calloc((size_t)(block_count + 1), sizeof(*offsets));
-  if (!offsets) return cleanup_pack(in, out, temp_path, ENOMEM);
+  if (!offsets) { fclose(in); return ENOMEM; }
+  write_buffer = (unsigned char *)malloc(PFSC_BLOCK_SIZE);
+  if (!write_buffer) { rc = ENOMEM; goto failed; }
   unsigned char header[PFSC_HEADER_SIZE] = {0};
   put_u32le(header + 0x00, PFSC_MAGIC); put_u32le(header + 0x04, PFSC_UNK4); put_u32le(header + 0x08, PFSC_UNK8); put_u32le(header + 0x0c, PFSC_BLOCK_SIZE); put_u64le(header + 0x10, PFSC_BLOCK_SIZE); put_u64le(header + 0x18, PFSC_OFFSETS_OFFSET); put_u64le(header + 0x20, data_offset); put_u64le(header + 0x28, logical_size);
-  if ((rc = write_all(out, header, sizeof(header))) || (rc = write_zeros(out, data_offset - sizeof(header)))) goto failed;
+  if (fseeko(out, (off_t)base_offset, SEEK_SET) != 0 ||
+      (rc = write_all(out, header, sizeof(header))) ||
+      (rc = write_zeros(out, data_offset - sizeof(header)))) { if (!rc) rc = EIO; goto failed; }
   pool.count = requested_workers ? (requested_workers > 8 ? 8 : (int)requested_workers) : pfsc_auto_workers();
   if (pool.count < 1) pool.count = 1;
-  pool.compression_level = compression_level; pool.cancel_requested = cancel_requested; pool.input_fd = fileno(in);
+  pool.compression_level = compression_level; pool.cancel_requested = cancel_requested;
   if (pthread_mutex_init(&pool.lock, NULL) || pthread_cond_init(&pool.work, NULL) || pthread_cond_init(&pool.result, NULL)) {
     rc = EAGAIN;
     goto failed;
@@ -269,14 +282,21 @@ int mkpfs_pack_pfsc_file_ex(const char *input_path, const char *output_path,
       threads_started++;
     }
   }
+  if (progress && progress(0, (uint64_t)st.st_size, "compress", input_path, opaque)) {
+    rc = ECANCELED;
+    goto failed_pool;
+  }
   stored_pos = data_offset;
   uint64_t next_dispatch = 0, next_write = 0;
   while (next_write < block_count) {
     while (next_dispatch < block_count && next_dispatch - next_write < (uint64_t)pool.count) {
       pfsc_slot_t *slot = &pool.slots[next_dispatch % (uint64_t)pool.count];
       memset(slot->raw, 0, PFSC_BLOCK_SIZE);
-      if (fseeko(in, (off_t)(next_dispatch * PFSC_BLOCK_SIZE), SEEK_SET) != 0) { rc = EIO; goto failed_pool; }
-      size_t got = fread(slot->raw, 1, PFSC_BLOCK_SIZE, in); if (ferror(in)) { rc = EIO; goto failed_pool; } (void)got;
+      size_t got = fread(slot->raw, 1, PFSC_BLOCK_SIZE, in);
+      if (ferror(in) || (got != PFSC_BLOCK_SIZE && next_dispatch + 1 < block_count)) {
+        rc = EIO;
+        goto failed_pool;
+      }
       if (pool.count == 1) {
         uLongf size = compressBound(PFSC_BLOCK_SIZE);
         if (cancellation_requested(cancel_requested)) { rc = ECANCELED; goto failed_pool; }
@@ -308,8 +328,17 @@ int mkpfs_pack_pfsc_file_ex(const char *input_path, const char *output_path,
     }
     if (rc) goto failed_pool;
     offsets[next_write] = stored_pos;
-    if (slot->compressed_size < PFSC_BLOCK_SIZE) { rc = write_all(out, slot->compressed, slot->compressed_size); stored_pos += slot->compressed_size; }
-    else { rc = write_all(out, slot->raw, PFSC_BLOCK_SIZE); stored_pos += PFSC_BLOCK_SIZE; }
+    if (slot->compressed_size < PFSC_BLOCK_SIZE) {
+      if (slot->compressed_size > PFSC_BLOCK_SIZE - write_buffer_used &&
+          (rc = write_buffer_flush(out, write_buffer, &write_buffer_used))) goto failed_pool;
+      memcpy(write_buffer + write_buffer_used, slot->compressed, slot->compressed_size);
+      write_buffer_used += slot->compressed_size;
+      stored_pos += slot->compressed_size;
+    } else {
+      if ((rc = write_buffer_flush(out, write_buffer, &write_buffer_used)) ||
+          (rc = write_all(out, slot->raw, PFSC_BLOCK_SIZE))) goto failed_pool;
+      stored_pos += PFSC_BLOCK_SIZE;
+    }
     if (rc) goto failed_pool;
     if (pool.count == 1) {
       slot->pending = 0;
@@ -318,71 +347,177 @@ int mkpfs_pack_pfsc_file_ex(const char *input_path, const char *output_path,
       pthread_mutex_lock(&pool.lock); slot->pending = 0; slot->done = 0; pthread_mutex_unlock(&pool.lock);
     }
     next_write++;
-    if (progress && progress(next_write * PFSC_BLOCK_SIZE > (uint64_t)st.st_size ? (uint64_t)st.st_size : next_write * PFSC_BLOCK_SIZE, (uint64_t)st.st_size, "compress", input_path, opaque)) { rc = ECANCELED; goto failed_pool; }
+    {
+      uint64_t completed = next_write * PFSC_BLOCK_SIZE > (uint64_t)st.st_size ?
+                           (uint64_t)st.st_size : next_write * PFSC_BLOCK_SIZE;
+      if (progress && (completed == (uint64_t)st.st_size ||
+                       completed - last_reported >= PFSC_PROGRESS_INTERVAL)) {
+        if (progress(completed, (uint64_t)st.st_size, "compress", input_path, opaque)) {
+          rc = ECANCELED;
+          goto failed_pool;
+        }
+        last_reported = completed;
+      }
+    }
   }
+  if ((rc = write_buffer_flush(out, write_buffer, &write_buffer_used))) goto failed_pool;
   pthread_mutex_lock(&pool.lock); pool.stopping = 1; pthread_cond_broadcast(&pool.work); pthread_mutex_unlock(&pool.lock);
   for (int i = 0; i < threads_started; i++) pthread_join(threads[i], NULL);
   threads_started = 0;
   offsets[block_count] = stored_pos;
-  if (fseeko(out, (off_t)PFSC_OFFSETS_OFFSET, SEEK_SET) != 0) { rc = EIO; goto failed_pool; }
-  for (uint64_t i = 0; i <= block_count; i++) { unsigned char b[8]; put_u64le(b, offsets[i]); if (write_all(out, b, 8)) { rc = EIO; goto failed_pool; } }
-  if (fflush(out) != 0 || fsync(fileno(out)) != 0) { rc = EIO; goto failed_pool; }
-  if (fclose(in) != 0 || fclose(out) != 0) { in = out = NULL; rc = EIO; goto failed_pool; }
-  in = out = NULL;
-  if (rename(temp_path, output_path) != 0) { rc = errno; unlink(temp_path); goto done_pool; }
+  if (fseeko(out, (off_t)(base_offset + PFSC_OFFSETS_OFFSET), SEEK_SET) != 0) { rc = EIO; goto failed_pool; }
+  {
+    unsigned char offset_buffer[PFSC_OFFSET_WRITE_ENTRIES * 8u];
+    size_t offset_used = 0;
+    for (uint64_t i = 0; i <= block_count; i++) {
+      if ((i % PFSC_OFFSET_WRITE_ENTRIES) == 0 && cancellation_requested(cancel_requested)) {
+        rc = ECANCELED;
+        goto failed_pool;
+      }
+      put_u64le(offset_buffer + offset_used, offsets[i]);
+      offset_used += 8;
+      if (offset_used == sizeof(offset_buffer)) {
+        if (write_all(out, offset_buffer, offset_used)) { rc = EIO; goto failed_pool; }
+        offset_used = 0;
+      }
+    }
+    if (offset_used && write_all(out, offset_buffer, offset_used)) { rc = EIO; goto failed_pool; }
+  }
+  if (fflush(out) != 0 || fclose(in) != 0) { in = NULL; rc = EIO; goto failed_pool; }
+  in = NULL;
+  if (stored_size_out) *stored_size_out = stored_pos;
   rc = 0; goto done_pool;
 failed_pool:
   if (pool_initialized) { pthread_mutex_lock(&pool.lock); pool.stopping = 1; pthread_cond_broadcast(&pool.work); pthread_cond_broadcast(&pool.result); pthread_mutex_unlock(&pool.lock); }
   for (int i = 0; i < threads_started; i++) pthread_join(threads[i], NULL);
   threads_started = 0;
-  if (in || out) { cleanup_pack(in, out, temp_path, rc ? rc : EIO); }
-  in = out = NULL;
+  if (in) fclose(in);
+  in = NULL;
   goto done_pool;
 failed:
-  rc = cleanup_pack(in, out, temp_path, rc ? rc : EIO); in = out = NULL;
+  if (in) fclose(in);
+  in = NULL;
 done_pool:
   if (pool.slots) for (int i = 0; i < pool.count; i++) { free(pool.slots[i].raw); free(pool.slots[i].compressed); }
-  free(pool.slots); free(threads); free(offsets);
+  free(pool.slots); free(threads); free(offsets); free(write_buffer);
   if (pool_initialized) { pthread_cond_destroy(&pool.work); pthread_cond_destroy(&pool.result); pthread_mutex_destroy(&pool.lock); }
   return rc;
+}
+
+int mkpfs_pack_pfsc_file_ex(const char *input_path, const char *output_path,
+                            int compression_level, unsigned int requested_workers,
+                            const atomic_int *cancel_requested,
+                            mkpfs_progress_callback progress, void *opaque) {
+  FILE *out = NULL;
+  char temp_path[PATH_MAX];
+  int rc;
+
+  if (!output_path) return EINVAL;
+  rc = open_secure_temp_file(output_path, "pfsc", temp_path, sizeof(temp_path), &out);
+  if (rc) return rc;
+  rc = pack_pfsc_into_stream(input_path, out, 0, compression_level, requested_workers,
+                             cancel_requested, progress, opaque, NULL);
+  if (rc) { cleanup_pack(NULL, out, temp_path, rc); return rc; }
+  if (fflush(out) != 0 || fsync(fileno(out)) != 0) { cleanup_pack(NULL, out, temp_path, EIO); return EIO; }
+  if (fclose(out) != 0) { out = NULL; unlink(temp_path); return EIO; }
+  out = NULL;
+  if (rename(temp_path, output_path) != 0) {
+    rc = errno;
+    unlink(temp_path);
+    return rc;
+  }
+  return 0;
 }
 
 int mkpfs_pack_pfsc_file(const char *input_path, const char *output_path, int compression_level, const atomic_int *cancel_requested, mkpfs_progress_callback progress, void *opaque) {
   return mkpfs_pack_pfsc_file_ex(input_path, output_path, compression_level, 1, cancel_requested, progress, opaque);
 }
 
-int mkpfs_verify_pfsc_file(const char *path, uint64_t *logical_size_out, uint64_t *block_count_out) {
-  FILE *f = NULL; unsigned char header[PFSC_HEADER_SIZE]; uint64_t logical_size, block_count, offsets_offset, data_offset, previous = 0; int rc = 0;
+static int verify_pfsc_stream(FILE *f, uint64_t base_offset,
+                              uint64_t *logical_size_out, uint64_t *block_count_out,
+                              const atomic_int *cancel_requested,
+                              mkpfs_progress_callback progress, void *opaque) {
+  unsigned char header[PFSC_HEADER_SIZE]; uint64_t logical_size, block_count, offsets_offset, data_offset, previous = 0, verified = 0, last_reported = 0; int rc = 0;
+  if (!f) return EINVAL;
+  if (fseeko(f, (off_t)base_offset, SEEK_SET) != 0 || read_all(f, header, sizeof(header))) return EINVAL;
+  if (get_u32le(header) != PFSC_MAGIC || get_u32le(header + 4) != PFSC_UNK4 || get_u32le(header + 8) != PFSC_UNK8 || get_u32le(header + 12) != PFSC_BLOCK_SIZE || get_u64le(header + 16) != PFSC_BLOCK_SIZE) return EINVAL;
+  offsets_offset = get_u64le(header + 24); data_offset = get_u64le(header + 32); logical_size = get_u64le(header + 40);
+  if (offsets_offset != PFSC_OFFSETS_OFFSET || data_offset < PFSC_INITIAL_DATA_OFFSET || logical_size == 0 || logical_size % PFSC_BLOCK_SIZE) return EINVAL;
+  block_count = logical_size / PFSC_BLOCK_SIZE;
+  if (fseeko(f, 0, SEEK_END) != 0) return EIO;
+  off_t file_size = ftello(f); if (file_size < 0 || base_offset > (uint64_t)file_size || (uint64_t)file_size - base_offset < data_offset) return EINVAL;
+  unsigned char *raw = (unsigned char *)malloc(PFSC_BLOCK_SIZE); unsigned char *stored = (unsigned char *)malloc(compressBound(PFSC_BLOCK_SIZE));
+  if (!raw || !stored) { free(raw); free(stored); return ENOMEM; }
+  if (progress && progress(0, logical_size, "verify", "verifying PFSC", opaque)) {
+    rc = ECANCELED;
+    goto verify_done;
+  }
+  for (uint64_t index = 0; index < block_count;) {
+    unsigned char offset_window[(PFSC_VERIFY_OFFSET_WINDOW + 1u) * 8u];
+    uint64_t count = block_count - index;
+    uint64_t payload_position = 0;
+    if (count > PFSC_VERIFY_OFFSET_WINDOW) count = PFSC_VERIFY_OFFSET_WINDOW;
+    if (cancellation_requested(cancel_requested)) { rc = ECANCELED; goto verify_done; }
+    if (fseeko(f, (off_t)(base_offset + offsets_offset + index * 8u), SEEK_SET) != 0 ||
+        read_all(f, offset_window, (size_t)(count + 1u) * 8u)) { rc = EIO; goto verify_done; }
+    for (uint64_t offset_index = 0; offset_index < count; offset_index++) {
+      uint64_t start = get_u64le(offset_window + offset_index * 8u);
+      uint64_t end = get_u64le(offset_window + (offset_index + 1u) * 8u);
+      if (index + offset_index == 0 && start != data_offset) { rc = EINVAL; goto verify_done; }
+      if (start < previous || end < start || end > (uint64_t)file_size - base_offset ||
+          end - start > PFSC_BLOCK_SIZE) { rc = EINVAL; goto verify_done; }
+      previous = start;
+    }
+    payload_position = get_u64le(offset_window);
+    if (fseeko(f, (off_t)(base_offset + payload_position), SEEK_SET) != 0) { rc = EIO; goto verify_done; }
+    for (uint64_t offset_index = 0; offset_index < count; offset_index++) {
+      uint64_t start = get_u64le(offset_window + offset_index * 8u);
+      uint64_t end = get_u64le(offset_window + (offset_index + 1u) * 8u);
+      uint64_t stored_size = end - start;
+      if (start != payload_position && fseeko(f, (off_t)(base_offset + start), SEEK_SET) != 0) { rc = EIO; goto verify_done; }
+      if (read_all(f, stored, (size_t)stored_size)) { rc = EIO; goto verify_done; }
+      payload_position = end;
+      if (stored_size == PFSC_BLOCK_SIZE) memcpy(raw, stored, PFSC_BLOCK_SIZE);
+      else {
+        uLongf raw_size = PFSC_BLOCK_SIZE;
+        if (uncompress(raw, &raw_size, stored, (uLong)stored_size) != Z_OK || raw_size != PFSC_BLOCK_SIZE) {
+          rc = EINVAL;
+          goto verify_done;
+        }
+      }
+      verified += PFSC_BLOCK_SIZE;
+    }
+    index += count;
+    if (progress && (verified >= logical_size || verified - last_reported >= PFSC_PROGRESS_INTERVAL) &&
+        progress(verified > logical_size ? logical_size : verified, logical_size,
+                 "verify", "verifying PFSC", opaque)) {
+      rc = ECANCELED;
+      goto verify_done;
+    }
+    if (progress && verified - last_reported >= PFSC_PROGRESS_INTERVAL) last_reported = verified;
+  }
+verify_done: free(raw); free(stored);
+  if (!rc) { if (logical_size_out) *logical_size_out = logical_size; if (block_count_out) *block_count_out = block_count; }
+  return rc;
+}
+
+static int verify_pfsc_file_impl(const char *path, uint64_t *logical_size_out,
+                                 uint64_t *block_count_out,
+                                 const atomic_int *cancel_requested,
+                                 mkpfs_progress_callback progress, void *opaque) {
+  FILE *f;
+  int rc;
   if (!path) return EINVAL;
   f = fopen(path, "rb");
   if (!f) return errno;
-  if (read_all(f, header, sizeof(header))) { fclose(f); return EINVAL; }
-  if (get_u32le(header) != PFSC_MAGIC || get_u32le(header + 4) != PFSC_UNK4 || get_u32le(header + 8) != PFSC_UNK8 || get_u32le(header + 12) != PFSC_BLOCK_SIZE || get_u64le(header + 16) != PFSC_BLOCK_SIZE) { fclose(f); return EINVAL; }
-  offsets_offset = get_u64le(header + 24); data_offset = get_u64le(header + 32); logical_size = get_u64le(header + 40);
-  if (offsets_offset != PFSC_OFFSETS_OFFSET || data_offset < PFSC_INITIAL_DATA_OFFSET || logical_size == 0 || logical_size % PFSC_BLOCK_SIZE) { fclose(f); return EINVAL; }
-  block_count = logical_size / PFSC_BLOCK_SIZE;
-  if (fseeko(f, 0, SEEK_END) != 0) { fclose(f); return EIO; }
-  off_t file_size = ftello(f); if (file_size < 0 || (uint64_t)file_size < data_offset) { fclose(f); return EINVAL; }
-  unsigned char *raw = (unsigned char *)malloc(PFSC_BLOCK_SIZE); unsigned char *stored = (unsigned char *)malloc(compressBound(PFSC_BLOCK_SIZE));
-  if (!raw || !stored) { free(raw); free(stored); fclose(f); return ENOMEM; }
-  if (fseeko(f, (off_t)offsets_offset, SEEK_SET) != 0) { rc = EIO; goto verify_done; }
-  uint64_t start = 0;
-  for (uint64_t i = 0; i < block_count; i++) {
-    unsigned char a[8], b[8]; if (read_all(f, a, 8)) { rc = EINVAL; goto verify_done; }
-    if (read_all(f, b, 8)) { rc = EINVAL; goto verify_done; }
-    start = get_u64le(a); uint64_t end = get_u64le(b);
-    if (i == 0 && start != data_offset) { rc = EINVAL; goto verify_done; }
-    if (start < previous || end < start || end > (uint64_t)file_size || end - start > PFSC_BLOCK_SIZE) { rc = EINVAL; goto verify_done; }
-    uint64_t stored_size = end - start;
-    if (fseeko(f, (off_t)start, SEEK_SET) != 0 || read_all(f, stored, (size_t)stored_size)) { rc = EIO; goto verify_done; }
-    if (stored_size == PFSC_BLOCK_SIZE) memcpy(raw, stored, PFSC_BLOCK_SIZE);
-    else { uLongf raw_size = PFSC_BLOCK_SIZE; if (uncompress(raw, &raw_size, stored, (uLong)stored_size) != Z_OK || raw_size != PFSC_BLOCK_SIZE) { rc = EINVAL; goto verify_done; } }
-    previous = start;
-    if (fseeko(f, (off_t)(offsets_offset + (i + 1) * 8), SEEK_SET) != 0) { rc = EIO; goto verify_done; }
-  }
-verify_done: free(raw); free(stored); fclose(f);
-  if (!rc) { if (logical_size_out) *logical_size_out = logical_size; if (block_count_out) *block_count_out = block_count; }
+  rc = verify_pfsc_stream(f, 0, logical_size_out, block_count_out,
+                          cancel_requested, progress, opaque);
+  fclose(f);
   return rc;
+}
+
+int mkpfs_verify_pfsc_file(const char *path, uint64_t *logical_size_out, uint64_t *block_count_out) {
+  return verify_pfsc_file_impl(path, logical_size_out, block_count_out, NULL, NULL, NULL);
 }
 
 static void put_i64le(unsigned char *p, int64_t v) { put_u64le(p, (uint64_t)v); }
@@ -427,36 +562,30 @@ static void pfs_inode(unsigned char *out, uint16_t mode, uint16_t nlink,
   for (int i = 0; i < 5; i++) put_u32le(out + 148 + i * 4, readonly ? 0xffffffffu : 0);
 }
 
-static int copy_file_at(FILE *out, uint64_t offset, const char *path) {
-  FILE *in = fopen(path, "rb"); unsigned char *buf = NULL; size_t n;
-  if (!in) return errno;
-  if (fseeko(out, (off_t)offset, SEEK_SET) != 0) { fclose(in); return EIO; }
-  buf = (unsigned char *)malloc(1024 * 1024); if (!buf) { fclose(in); return ENOMEM; }
-  while ((n = fread(buf, 1, 1024 * 1024, in)) != 0) if (write_all(out, buf, n)) { free(buf); fclose(in); return EIO; }
-  int read_error = ferror(in) ? EIO : 0;
-  free(buf); fclose(in); return read_error;
-}
-
 int mkpfs_wrap_exfat_file_ex(const char *exfat_path, const char *output_path,
                              const char *inner_name, int compression_level,
                              unsigned int workers,
                              const atomic_int *cancel_requested,
                           mkpfs_progress_callback progress, void *opaque) {
-  struct stat st; char pfsc_path[PATH_MAX], temp_path[PATH_MAX]; FILE *out = NULL;
+  struct stat st; char temp_path[PATH_MAX]; FILE *out = NULL;
   unsigned char *inode_table = NULL, *root_dir = NULL; uint64_t pfsc_size, raw_size, pfsc_blocks, final_blocks;
   uint32_t hash; int rc;
   if (!exfat_path || !output_path || !inner_name || !*inner_name) return EINVAL;
   if (stat(exfat_path, &st) != 0 || !S_ISREG(st.st_mode)) return errno ? errno : EINVAL;
-  if (snprintf(pfsc_path, sizeof(pfsc_path), "%s.pfsc.tmp.%ld", output_path, (long)getpid()) >= (int)sizeof(pfsc_path)) return ENAMETOOLONG;
-  if (mkpfs_pack_pfsc_file_ex(exfat_path, pfsc_path, compression_level, workers, cancel_requested, progress, opaque) != 0) return EIO;
-  if (stat(pfsc_path, &st) != 0) { unlink(pfsc_path); return errno; }
-  pfsc_size = (uint64_t)st.st_size; raw_size = 0; pfsc_blocks = (pfsc_size + 65535) / 65536;
-  if (mkpfs_verify_pfsc_file(pfsc_path, &raw_size, NULL) != 0) { unlink(pfsc_path); return EINVAL; }
-  if (pfs_hash_path(inner_name, &hash) != 0) { unlink(pfsc_path); return EINVAL; }
   rc = open_secure_temp_file(output_path, "pfs", temp_path, sizeof(temp_path), &out);
-  if (rc) { unlink(pfsc_path); return rc; }
+  if (rc) return rc;
+  if (!out) { unlink(temp_path); return EIO; }
+  rc = pack_pfsc_into_stream(exfat_path, out, 6u * 65536u, compression_level, workers,
+                             cancel_requested, progress, opaque, &pfsc_size);
+  if (rc != 0) goto wrap_failed;
+  raw_size = 0;
+  rc = verify_pfsc_stream(out, 6u * 65536u, &raw_size, NULL, cancel_requested, progress, opaque);
+  if (rc != 0) goto wrap_failed;
+  if (cancellation_requested(cancel_requested)) { rc = ECANCELED; goto wrap_failed; }
+  pfsc_blocks = (pfsc_size + 65535) / 65536;
+  if (pfs_hash_path(inner_name, &hash) != 0) { rc = EINVAL; goto wrap_failed; }
   inode_table = (unsigned char *)calloc(4, 0xA8); root_dir = (unsigned char *)calloc(1, 65536);
-  if (!inode_table || !root_dir) { free(inode_table); free(root_dir); fclose(out); unlink(temp_path); unlink(pfsc_path); return ENOMEM; }
+  if (!inode_table || !root_dir) { rc = ENOMEM; goto wrap_failed; }
   size_t pos = 0;
   pos += pfs_dirent(root_dir + pos, 65536 - pos, 0, 4, ".");
   pos += pfs_dirent(root_dir + pos, 65536 - pos, 0, 5, "..");
@@ -470,14 +599,17 @@ int mkpfs_wrap_exfat_file_ex(const char *exfat_path, const char *output_path,
   pfs_inode(inode_table + 3 * 0xA8, 0x8101, 1, 0x11, pfsc_size, raw_size, pfsc_blocks, 6, 1);
   unsigned char header[65536] = {0};
   put_i64le(header + 0x00, 2); put_i64le(header + 0x08, 20130315); put_i64le(header + 0x10, 0); header[0x1a] = 1; put_u32le(header + 0x1c, 0x0008); put_u32le(header + 0x20, 65536); put_i64le(header + 0x28, 1); put_i64le(header + 0x30, 4); put_i64le(header + 0x38, 0); put_i64le(header + 0x40, 1); put_u32le(header + 0x368, 1);
-  if (write_all(out, header, sizeof(header)) || write_all(out, inode_table, 4 * 0xA8)) { rc = EIO; goto wrap_failed; }
-  if (fseeko(out, 2 * 65536, SEEK_SET) != 0 || write_all(out, root_dir, 65536) || fseeko(out, 3 * 65536, SEEK_SET) != 0 || write_all(out, fpt, sizeof(fpt)) || fseeko(out, 5 * 65536, SEEK_SET) != 0 || write_all(out, uroot, sizeof(uroot)) || copy_file_at(out, 6 * 65536, pfsc_path)) { rc = EIO; goto wrap_failed; }
+  if (progress && progress(0, pfsc_size, "publish", "publishing output", opaque)) { rc = ECANCELED; goto wrap_failed; }
+  if (fseeko(out, 0, SEEK_SET) != 0 || write_all(out, header, sizeof(header)) || write_all(out, inode_table, 4 * 0xA8)) { rc = EIO; goto wrap_failed; }
+  if (fseeko(out, 2 * 65536, SEEK_SET) != 0 || write_all(out, root_dir, 65536) || fseeko(out, 3 * 65536, SEEK_SET) != 0 || write_all(out, fpt, sizeof(fpt)) || fseeko(out, 5 * 65536, SEEK_SET) != 0 || write_all(out, uroot, sizeof(uroot))) { rc = EIO; goto wrap_failed; }
+  if (cancellation_requested(cancel_requested) ||
+      (progress && progress(pfsc_size, pfsc_size, "publish", "publishing output", opaque))) { rc = ECANCELED; goto wrap_failed; }
   final_blocks = 6 + pfsc_blocks; put_i64le(header + 0x38, (int64_t)final_blocks); if (fseeko(out, 0, SEEK_SET) != 0 || write_all(out, header, sizeof(header)) || fflush(out) != 0 || fsync(fileno(out)) != 0) { rc = EIO; goto wrap_failed; }
   if (fclose(out) != 0) { out = NULL; rc = EIO; goto wrap_failed_no_out; }
   out = NULL; if (rename(temp_path, output_path) != 0) { rc = errno; goto wrap_failed_no_out; }
-  unlink(pfsc_path); free(inode_table); free(root_dir); return 0;
+  free(inode_table); free(root_dir); return 0;
 wrap_failed: if (out) fclose(out);
-wrap_failed_no_out: unlink(temp_path); unlink(pfsc_path); free(inode_table); free(root_dir); return rc;
+wrap_failed_no_out: unlink(temp_path); free(inode_table); free(root_dir); return rc;
 }
 
 int mkpfs_wrap_exfat_file(const char *exfat_path, const char *output_path, const char *inner_name, int compression_level, const atomic_int *cancel_requested, mkpfs_progress_callback progress, void *opaque) {
