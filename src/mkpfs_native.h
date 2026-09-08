@@ -33,6 +33,13 @@ typedef int (*mkpfs_progress_callback)(uint64_t done, uint64_t total,
 int mkpfs_normalize_path(const char *input, char *output, size_t output_size);
 int mkpfs_scan_folder(const char *root, mkpfs_scan_result_t *result);
 
+/* Return a conservative upper bound for free space required on the destination
+ * filesystem while building a folder conversion.  The estimate includes the
+ * full temporary exFAT image and the concurrently-written atomic PFS/PFSC
+ * output, so callers can reject an unsafe conversion before it starts. */
+int mkpfs_estimate_conversion_workspace(const mkpfs_scan_result_t *scan,
+                                        uint64_t *bytes_out);
+
 /* Pack an already-built logical PFS image into the upstream PFSC container. */
 int mkpfs_pack_pfsc_file_ex(const char *input_path, const char *output_path,
                             int compression_level, unsigned int workers,

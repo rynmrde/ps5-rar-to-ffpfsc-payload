@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Local disposable-fixture API regressions for destructive path handling."""
 import os
+import json
 import shutil
 import signal
 import subprocess
@@ -82,6 +83,50 @@ try:
         }).encode())
         if status != 409 or list(output.iterdir()):
             raise RuntimeError(f"basename collision copy status {status}")
+        # A conversion needs room for both its complete temporary exFAT image
+        # and its atomically published PFS/PFSC output. A sparse source lets
+        # this API test exercise the capacity guard without consuming host
+        # disk space or starting a worker.
+        huge = source / "sparse-too-large.bin"
+        stats = os.statvfs(output)
+        available = stats.f_bavail * (stats.f_frsize or stats.f_bsize)
+        with huge.open("wb") as sparse:
+            # The complete exFAT image plus its final PFS/PFSC container must
+            # exceed the space that is currently available. Keep the sparse
+            # logical length within ordinary filesystem limits.
+            sparse.truncate(available // 2 + 65536)
+        status, _ = call("/api/convert?" + urllib.parse.urlencode({
+            "source": str(source), "destination": str(output),
+            "name": "unsafe-space.ffpfsc", "profile": "7"
+        }))
+        if status != 507 or (output / "unsafe-space.ffpfsc").exists():
+            raise RuntimeError(f"unsafe conversion space check status {status}")
+        huge.unlink()
+        status, body = call("/api/convert?" + urllib.parse.urlencode({
+            "source": str(source), "destination": str(output),
+            "name": "completed.ffpfsc", "profile": "7"
+        }))
+        if status != 200:
+            raise RuntimeError(f"normal conversion setup status {status}")
+        task_id = json.loads(body)["task_id"]
+        deadline = time.monotonic() + 30
+        while True:
+            status, body = call("/api/tasks", method="GET")
+            if status != 200:
+                raise RuntimeError(f"conversion task poll status {status}")
+            task = next((item for item in json.loads(body)["tasks"]
+                         if item["id"] == task_id), None)
+            if task and task["state"] in ("done", "failed", "canceled"):
+                if task["state"] != "done":
+                    raise RuntimeError(f"normal conversion ended {task['state']}: {task['error']}")
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError("normal conversion did not finish")
+            time.sleep(0.1)
+        if not (output / "completed.ffpfsc").is_file():
+            raise RuntimeError("normal conversion did not publish output")
+        if list(output.glob(".*.mkpfs-conversion-*.incomplete")):
+            raise RuntimeError("normal conversion left an interrupted-job note")
         status, body = call("/api/list?" + urllib.parse.urlencode({"path": str(root / "output")}), method="POST")
         if status != 200 or b'"ok":true' not in body:
             raise RuntimeError("authenticated file browse failed")

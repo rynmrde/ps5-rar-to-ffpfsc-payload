@@ -39,6 +39,18 @@ static uint64_t align_up_u64(uint64_t value, uint64_t alignment) {
   return (value + alignment - 1) / alignment * alignment;
 }
 
+static int add_u64_checked(uint64_t left, uint64_t right, uint64_t *out) {
+  if (left > UINT64_MAX - right) return EOVERFLOW;
+  *out = left + right;
+  return 0;
+}
+
+static int multiply_u64_checked(uint64_t left, uint64_t right, uint64_t *out) {
+  if (left && right > UINT64_MAX / left) return EOVERFLOW;
+  *out = left * right;
+  return 0;
+}
+
 static int write_all(FILE *f, const void *data, size_t size) {
   return fwrite(data, 1, size, f) == size ? 0 : EIO;
 }
@@ -106,8 +118,24 @@ static int scan_dir(const char *path, mkpfs_scan_result_t *result) {
     if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
     if (snprintf(child, sizeof(child), "%s/%s", path, entry->d_name) >= (int)sizeof(child)) { closedir(dir); return ENAMETOOLONG; }
     if (lstat(child, &st) != 0) { rc = errno; closedir(dir); return rc; }
-    if (S_ISREG(st.st_mode)) { result->file_count++; result->total_bytes += (uint64_t)st.st_size; }
-    else if (S_ISDIR(st.st_mode)) { result->directory_count++; rc = scan_dir(child, result); if (rc) { closedir(dir); return rc; } }
+    if (S_ISREG(st.st_mode)) {
+      if (result->file_count == UINT64_MAX ||
+          (uint64_t)st.st_size > UINT64_MAX - result->total_bytes) {
+        closedir(dir);
+        return EOVERFLOW;
+      }
+      result->file_count++;
+      result->total_bytes += (uint64_t)st.st_size;
+    }
+    else if (S_ISDIR(st.st_mode)) {
+      if (result->directory_count == UINT64_MAX) {
+        closedir(dir);
+        return EOVERFLOW;
+      }
+      result->directory_count++;
+      rc = scan_dir(child, result);
+      if (rc) { closedir(dir); return rc; }
+    }
     else if (S_ISLNK(st.st_mode)) { closedir(dir); return ELOOP; }
   }
   closedir(dir); return 0;
@@ -118,6 +146,115 @@ int mkpfs_scan_folder(const char *root, mkpfs_scan_result_t *result) {
   if (!root || !result || lstat(root, &st) != 0) return errno;
   if (!S_ISDIR(st.st_mode)) return ENOTDIR;
   memset(result, 0, sizeof(*result)); return scan_dir(root, result);
+}
+
+int mkpfs_estimate_conversion_workspace(const mkpfs_scan_result_t *scan,
+                                        uint64_t *bytes_out) {
+  uint64_t padded_file_bytes;
+  uint64_t tree_nodes;
+  uint64_t directory_entry_bytes;
+  uint64_t minimum_directory_bytes;
+  uint64_t directory_bytes;
+  uint64_t content_bytes;
+  uint64_t content_clusters;
+  uint64_t bitmap_clusters = 1;
+  uint64_t cluster_count;
+  uint64_t fat_sectors;
+  uint64_t heap_offset_sectors;
+  uint64_t exfat_bytes;
+  uint64_t block_count;
+  uint64_t offsets_bytes;
+  uint64_t pfsc_data_offset;
+  uint64_t pfs_bytes;
+  uint64_t peak_bytes;
+  int rc;
+
+  if (!scan || !bytes_out) return EINVAL;
+
+  /* Every regular source file is represented by an integral 64 KiB exFAT
+   * allocation.  Use an upper bound of one extra cluster per file rather than
+   * walking the source a second time. */
+  if (scan->file_count > UINT64_MAX / (PFSC_BLOCK_SIZE - 1u) ||
+      scan->total_bytes > UINT64_MAX -
+                          scan->file_count * (PFSC_BLOCK_SIZE - 1u)) {
+    return EOVERFLOW;
+  }
+  padded_file_bytes = scan->total_bytes +
+                      scan->file_count * (PFSC_BLOCK_SIZE - 1u);
+  padded_file_bytes = (padded_file_bytes / PFSC_BLOCK_SIZE) * PFSC_BLOCK_SIZE;
+
+  /* A directory entry set has at least two entries. The maximum 255-byte
+   * source name uses 17 name entries, so 19 32-byte entries per child is a
+   * conservative deterministic bound. Every directory, including an empty
+   * one, allocates at least one 64 KiB cluster. */
+  if ((rc = add_u64_checked(scan->file_count, scan->directory_count,
+                            &tree_nodes)) ||
+      (rc = multiply_u64_checked(tree_nodes, 19u * 32u,
+                                 &directory_entry_bytes)) ||
+      (rc = add_u64_checked(scan->directory_count, 1u, &tree_nodes)) ||
+      (rc = multiply_u64_checked(tree_nodes, PFSC_BLOCK_SIZE,
+                                 &minimum_directory_bytes)) ||
+      (rc = add_u64_checked(minimum_directory_bytes, 96u,
+                            &directory_bytes)) ||
+      (rc = add_u64_checked(directory_bytes, directory_entry_bytes,
+                            &directory_bytes))) return rc;
+
+  if ((rc = add_u64_checked(padded_file_bytes, directory_bytes,
+                            &content_bytes)) ||
+      (rc = add_u64_checked(content_bytes, PFSC_BLOCK_SIZE, &content_bytes))) {
+    return rc;
+  }
+  content_clusters = content_bytes / PFSC_BLOCK_SIZE;
+  if (content_clusters > UINT32_MAX - 65536u) return EFBIG;
+
+  /* Match exfat_write_folder's bitmap convergence and its fixed 128-sector
+   * boot region plus FAT/heap alignment. */
+  for (;;) {
+    uint64_t required_bitmap_bytes;
+    uint64_t next_bitmap_clusters;
+    if ((rc = add_u64_checked(bitmap_clusters, content_clusters,
+                              &required_bitmap_bytes))) return rc;
+    if (required_bitmap_bytes > UINT64_MAX - 7u) return EOVERFLOW;
+    required_bitmap_bytes = (required_bitmap_bytes + 7u) / 8u;
+    if (required_bitmap_bytes > UINT64_MAX - (PFSC_BLOCK_SIZE - 1u)) {
+      return EOVERFLOW;
+    }
+    next_bitmap_clusters = (required_bitmap_bytes + PFSC_BLOCK_SIZE - 1u) /
+                           PFSC_BLOCK_SIZE;
+    if (next_bitmap_clusters == bitmap_clusters) break;
+    bitmap_clusters = next_bitmap_clusters;
+  }
+  if ((rc = add_u64_checked(bitmap_clusters, content_clusters,
+                            &cluster_count))) return rc;
+  if (cluster_count > UINT32_MAX - 2u) return EFBIG;
+  if ((rc = add_u64_checked(cluster_count, 2u, &fat_sectors))) return rc;
+  if ((rc = multiply_u64_checked(fat_sectors, 4u, &fat_sectors))) return rc;
+  if (fat_sectors > UINT64_MAX - 511u) return EOVERFLOW;
+  fat_sectors = (fat_sectors + 511u) / 512u;
+  if (fat_sectors > UINT64_MAX - 127u) return EOVERFLOW;
+  fat_sectors = ((fat_sectors + 127u) / 128u) * 128u;
+  if ((rc = add_u64_checked(128u, fat_sectors, &heap_offset_sectors))) return rc;
+  if (heap_offset_sectors > UINT64_MAX - 127u) return EOVERFLOW;
+  heap_offset_sectors = ((heap_offset_sectors + 127u) / 128u) * 128u;
+  if ((rc = multiply_u64_checked(cluster_count, 128u, &exfat_bytes)) ||
+      (rc = add_u64_checked(exfat_bytes, heap_offset_sectors, &exfat_bytes)) ||
+      (rc = multiply_u64_checked(exfat_bytes, 512u, &exfat_bytes))) return rc;
+
+  block_count = (exfat_bytes + PFSC_BLOCK_SIZE - 1u) / PFSC_BLOCK_SIZE;
+  if (block_count > (UINT64_MAX / sizeof(uint64_t)) - 1u) return EOVERFLOW;
+  offsets_bytes = (block_count + 1u) * sizeof(uint64_t);
+  if (offsets_bytes > PFSC_MAX_OFFSETS_BYTES) return EFBIG;
+  if (offsets_bytes > UINT64_MAX - PFSC_OFFSETS_OFFSET -
+                      (PFSC_BLOCK_SIZE - 1u)) return EOVERFLOW;
+  pfsc_data_offset = align_up_u64(PFSC_OFFSETS_OFFSET + offsets_bytes,
+                                  PFSC_BLOCK_SIZE);
+  /* A PFSC block can be stored uncompressed, so this is its maximum size. */
+  if ((rc = add_u64_checked(pfsc_data_offset, exfat_bytes, &pfs_bytes)) ||
+      (rc = add_u64_checked(pfs_bytes, 6u * PFSC_BLOCK_SIZE, &pfs_bytes)) ||
+      (rc = add_u64_checked(exfat_bytes, pfs_bytes, &peak_bytes))) return rc;
+
+  *bytes_out = peak_bytes;
+  return 0;
 }
 
 static int write_zeros(FILE *out, uint64_t count) {

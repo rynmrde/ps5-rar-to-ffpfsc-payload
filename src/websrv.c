@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -312,7 +313,7 @@ websrv_listen(unsigned short port) {
     return -1;
   }
   {
-    struct sockaddr_in bound_addr;
+    struct sockaddr_in bound_addr = {0};
     socklen_t bound_len = sizeof(bound_addr);
     if(getsockname(srvfd, (struct sockaddr *)&bound_addr, &bound_len) != 0) {
       perror("getsockname");
@@ -353,15 +354,21 @@ websrv_listen(unsigned short port) {
   while(!g_stop_requested) {
     addr_len = sizeof(client_addr);
     if((connfd = accept(srvfd, (struct sockaddr *)&client_addr, &addr_len)) < 0) {
+      if(errno == EINTR) {
+        continue;
+      }
       if(!g_stop_requested) perror("accept");
       break;
     }
     websrv_tune_connection_socket(connfd);
     if(MHD_add_connection(httpd, connfd, (struct sockaddr *)&client_addr,
                           addr_len) != MHD_YES) {
-      perror("MHD_add_connection");
+      /* A rejected peer (for example, a client exceeding the bounded MHD
+       * connection limit) must not tear down the listener or cancel a long
+       * filesystem job. Drop only that socket and keep serving existing work. */
+      fprintf(stderr, "MHD_add_connection rejected client; keeping server alive\n");
       close(connfd);
-      break;
+      continue;
     }
   }
 

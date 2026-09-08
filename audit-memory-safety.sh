@@ -21,7 +21,7 @@ clang++-18 -x c $SAN -o audit-bin/test_archive_extract_asan tests/test_archive_e
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
   ARCHIVE_TEST_BIN="$repo/audit-bin/test_archive_extract_asan" ./tests/test_archive_extract.sh
 clang++-18 -x c $SAN $(pkg-config --cflags libmicrohttpd) \
-  -DVERSION_TAG='"v0.3.4"' -DTITLE_ID='"FMGR88888"' \
+  -DVERSION_TAG='"v0.3.5"' -DTITLE_ID='"FMGR88888"' \
   -o audit-bin/web-file-mgr-linux_asan \
   src/main.c src/websrv.c src/filemgr.c src/file_response.c src/task.c src/upload.c \
   src/download.c src/url_download.c src/text.c src/list.c src/space.c src/fs_util.c src/json_util.c \

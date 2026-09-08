@@ -77,6 +77,23 @@ with log_path.open("wb") as log:
         response = send_raw(b"POST /api/tasks HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
         if b"403" not in response.split(b"\r\n", 1)[0]:
             raise RuntimeError(f"unauthenticated API request was not denied: {response[:120]!r}")
+        # Hold more connections than the deliberately small per-IP limit.
+        # A rejected peer must be dropped without tearing down the listener
+        # or an unrelated long-running filesystem job.
+        holders = []
+        try:
+            for _ in range(12):
+                holder = socket.create_connection(("127.0.0.1", port), timeout=2)
+                holder.settimeout(2)
+                holders.append(holder)
+            time.sleep(0.25)
+        finally:
+            for holder in holders:
+                holder.close()
+        time.sleep(0.25)
+        response = send_raw(requests[0])
+        if proc.poll() is not None or b"200" not in response.split(b"\r\n", 1)[0]:
+            raise RuntimeError("server did not survive connection-limit rejection")
         for index, payload in enumerate(requests, 1):
             response = send_raw(payload)
             if proc.poll() is not None:

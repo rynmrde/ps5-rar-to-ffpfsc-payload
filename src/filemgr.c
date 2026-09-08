@@ -369,6 +369,10 @@ count_path_bytes_sync(file_task_t *task, const char *path, const char *display,
                       size_t *dir_count) {
   struct stat st;
 
+  if(!path || !total) {
+    errno = EINVAL;
+    return -1;
+  }
   if(task && task_cancel_requested(task)) {
     return -1;
   }
@@ -1690,6 +1694,87 @@ typedef struct conversion_progress_ctx {
   unsigned long long last;
 } conversion_progress_ctx_t;
 
+static int
+write_all_fd(int fd, const char *data, size_t size) {
+  while(size) {
+    ssize_t written = write(fd, data, size);
+
+    if(written < 0) {
+      if(errno == EINTR) continue;
+      return -1;
+    }
+    if(!written) {
+      errno = EIO;
+      return -1;
+    }
+    data += (size_t)written;
+    size -= (size_t)written;
+  }
+  return 0;
+}
+
+static int
+create_conversion_recovery_note(file_task_t *task) {
+  char parent[PATH_MAX];
+  const char *base;
+  char message[PATH_MAX * 2 + 512];
+  int fd;
+  int length;
+
+  if(path_dirname(task->dst, parent, sizeof(parent))) return -1;
+  base = path_basename(task->dst);
+  if(!base[0] || snprintf(task->conversion_recovery_note,
+                          sizeof(task->conversion_recovery_note),
+                          "%s/.%s.mkpfs-conversion-%lu.incomplete",
+                          parent, base, task->id) >=
+                          (int)sizeof(task->conversion_recovery_note)) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+  fd = open(task->conversion_recovery_note,
+            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+  if(fd < 0) return -1;
+  length = snprintf(message, sizeof(message),
+                    "An MkPFS folder conversion is in progress.\n"
+                    "Source: %s\n"
+                    "Final output: %s\n"
+                    "Task: %lu\n"
+                    "If this note remains after the payload is no longer "
+                    "running, the conversion was interrupted. Do not use "
+                    "its incomplete temporary files. Remove only the "
+                    "temporary files associated with this final-output name "
+                    "after confirming that no active payload is using them.\n",
+                    task->src, task->dst, task->id);
+  if(length < 0 || (size_t)length >= sizeof(message) ||
+     write_all_fd(fd, message, (size_t)length) || fsync(fd)) {
+    int error = errno ? errno : EIO;
+    close(fd);
+    unlink(task->conversion_recovery_note);
+    task->conversion_recovery_note[0] = 0;
+    errno = error;
+    return -1;
+  }
+  if(close(fd)) {
+    int error = errno ? errno : EIO;
+    unlink(task->conversion_recovery_note);
+    task->conversion_recovery_note[0] = 0;
+    errno = error;
+    return -1;
+  }
+  return 0;
+}
+
+static void
+remove_conversion_recovery_note(file_task_t *task) {
+  if(task->conversion_recovery_note[0]) {
+    if(unlink(task->conversion_recovery_note) && errno != ENOENT) {
+      fprintf(stderr, "conversion recovery note cleanup failed: %s\n",
+              strerror(errno));
+    }
+    task->conversion_recovery_note[0] = 0;
+  }
+}
+
 static int conversion_progress(uint64_t done, uint64_t phase_total, const char *phase, const char *current, void *opaque) {
   conversion_progress_ctx_t *ctx = opaque;
   unsigned long long start = 0;
@@ -1757,13 +1842,29 @@ task_worker(void *arg) {
     mkpfs_scan_result_t scan;
     mkpfs_native_options_t options = {0};
     conversion_progress_ctx_t progress = {.task = task};
+    uint64_t workspace = 0;
+    unsigned long long available = 0;
     char output_dir[PATH_MAX];
     char *output_name;
     snprintf(output_dir, sizeof(output_dir), "%s", task->dst);
     output_name = strrchr(output_dir, '/');
-    if (output_name) { *output_name++ = 0; } else { output_name = output_dir; snprintf(output_dir, sizeof(output_dir), "."); }
+    if (output_name) {
+      *output_name++ = 0;
+      if(!output_dir[0]) snprintf(output_dir, sizeof(output_dir), "/");
+    } else {
+      output_name = output_dir;
+      snprintf(output_dir, sizeof(output_dir), ".");
+    }
     if (mkpfs_scan_folder(task->srcs[0], &scan)) {
       ret = errno ? errno : EIO;
+    } else if((ret = mkpfs_estimate_conversion_workspace(&scan, &workspace)) != 0) {
+      task_set_error_code(task, "conversion_size", task->srcs[0]);
+    } else if(target_available_space(output_dir, &available)) {
+      ret = errno ? errno : EIO;
+      task_set_error_code(task, "space_check_failed", output_dir);
+    } else if(available < workspace) {
+      ret = ENOSPC;
+      task_set_error_code(task, "no_space", output_dir);
     } else {
       progress.total = scan.total_bytes ? scan.total_bytes * 2 + 1 : 1;
       task_set_total(task, progress.total);
@@ -1771,9 +1872,13 @@ task_worker(void *arg) {
       options.workers = task->conversion_workers;
       options.compression = 1; options.verify = 1; options.verify_structure = 1;
       task_update(task, TASK_RUNNING, "native conversion", 0, NULL);
-      ret = mkpfs_convert_folder_progress(task->srcs[0], output_dir, output_name,
-                                           &options, &task->cancel_requested,
-                                           conversion_progress, &progress);
+      if(create_conversion_recovery_note(task)) {
+        ret = errno ? errno : EIO;
+      } else {
+        ret = mkpfs_convert_folder_progress(task->srcs[0], output_dir, output_name,
+                                             &options, &task->cancel_requested,
+                                             conversion_progress, &progress);
+      }
     }
   }
   if(task->op == TASK_EXTRACT) {
@@ -1965,6 +2070,7 @@ task_worker(void *arg) {
     }
   }
 
+  remove_conversion_recovery_note(task);
   if(ret) {
     errno = ret;
     if(errno == ECANCELED || task_cancel_requested(task)) {
@@ -2117,8 +2223,10 @@ api_convert(struct MHD_Connection *conn) {
     rc = MHD_HTTP_BAD_REQUEST; goto convert_error;
   }
   if (mkpfs_scan_folder(source, &scan)) { rc = MHD_HTTP_BAD_REQUEST; goto convert_error; }
-  unsigned long long required_space = scan.total_bytes > ULLONG_MAX - 64ULL * 1024ULL * 1024ULL ? ULLONG_MAX : scan.total_bytes + 64ULL * 1024ULL * 1024ULL;
-  if (target_available_space(destination, &available) || available < required_space) {
+  uint64_t required_workspace = 0;
+  if (mkpfs_estimate_conversion_workspace(&scan, &required_workspace) ||
+      target_available_space(destination, &available) ||
+      available < required_workspace) {
     rc = MHD_HTTP_INSUFFICIENT_STORAGE; goto convert_error;
   }
   if (snprintf(output, sizeof(output), "%s/%s", destination, name) >= (int)sizeof(output)) { rc = MHD_HTTP_BAD_REQUEST; goto convert_error; }
@@ -2138,7 +2246,10 @@ api_convert(struct MHD_Connection *conn) {
   free(destination); free(name); free(profile); free(workers_param); return send_buffer(conn, MHD_HTTP_OK, b.data, "application/json");
 convert_error:
   free(source); free(destination); free(name); free(profile); free(workers_param); free(srcs); if (task) { free(task->srcs); free(task); }
-  return send_json_error(conn, rc, rc == MHD_HTTP_INSUFFICIENT_STORAGE ? "insufficient storage" : "invalid conversion request");
+  return send_json_error(conn, rc,
+                         rc == MHD_HTTP_INSUFFICIENT_STORAGE ?
+                         "insufficient safe working space for temporary image and final output" :
+                         "invalid conversion request");
 }
 
 static enum MHD_Result

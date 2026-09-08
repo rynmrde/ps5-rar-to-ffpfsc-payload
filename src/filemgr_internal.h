@@ -47,6 +47,7 @@ typedef struct file_task {
   char error_code[64];
   char error_arg[PATH_MAX + 96];
   char conversion_name[NAME_MAX];
+  char conversion_recovery_note[PATH_MAX];
   char archive_password[256];
   char **srcs;
   size_t src_count;
