@@ -1713,7 +1713,7 @@ write_all_fd(int fd, const char *data, size_t size) {
   return 0;
 }
 
-#define CONVERSION_JOURNAL_VERSION 2u
+#define CONVERSION_JOURNAL_VERSION 3u
 #define CONVERSION_JOURNAL_PREFIX "mkpfs-conversion-"
 #define CONVERSION_JOURNAL_SUFFIX ".resume"
 
@@ -1770,6 +1770,22 @@ ensure_conversion_journal_directory(void) {
     return -1;
   }
   return 0;
+}
+
+static int
+sync_conversion_journal_directory(void) {
+  int fd;
+  int error;
+
+  fd = open(conversion_journal_directory(), O_RDONLY | O_DIRECTORY);
+  if(fd < 0) return -1;
+  if(fsync(fd)) {
+    error = errno ? errno : EIO;
+    close(fd);
+    errno = error;
+    return -1;
+  }
+  return close(fd) == 0 ? 0 : -1;
 }
 
 static int
@@ -1976,6 +1992,7 @@ write_conversion_journal(file_task_t *task) {
     errno = error;
     return -1;
   }
+  if(sync_conversion_journal_directory()) return -1;
   return 0;
 }
 
@@ -2515,15 +2532,14 @@ task_worker(void *arg) {
       task_update(task, TASK_CANCELED, task->current[0] ? task->current : task->src,
                   0, "canceled");
     } else {
-      if(task->op == TASK_CONVERT && task->conversion_recovered &&
-         (errno == ESTALE || errno == EINVAL)) {
-        /* Do not retry a checkpoint whose input changed or whose private
-         * staging structure cannot be validated.  It can otherwise consume
-         * space indefinitely after every payload restart. */
+      if(task->op == TASK_CONVERT &&
+         (errno == ESTALE || (task->conversion_recovered && errno == EINVAL))) {
+        /* Do not retain a snapshot whose source changed, or retry a recovered
+         * checkpoint whose private staging structure cannot be validated. */
         remove_conversion_private_stages(task);
         remove_conversion_journal(task);
         remove_conversion_recovery_note(task);
-        task_set_error_code(task, errno == ESTALE ? "resume_source_changed" :
+        task_set_error_code(task, errno == ESTALE ? "conversion_source_changed" :
                                                 "resume_checkpoint_invalid",
                             task->src);
       }

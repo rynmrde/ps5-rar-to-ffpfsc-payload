@@ -23,7 +23,7 @@ clang++-18 -x c $SAN -o audit-bin/test_archive_extract_asan tests/test_archive_e
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
   ARCHIVE_TEST_BIN="$repo/audit-bin/test_archive_extract_asan" ./tests/test_archive_extract.sh
 clang++-18 -x c $SAN $(pkg-config --cflags libmicrohttpd) \
-  -DVERSION_TAG='"v0.3.6"' -DTITLE_ID='"FMGR88888"' \
+  -DVERSION_TAG='"v0.3.7"' -DTITLE_ID='"FMGR88888"' \
   -o audit-bin/web-file-mgr-linux_asan \
   src/main.c src/websrv.c src/filemgr.c src/file_response.c src/task.c src/upload.c \
   src/download.c src/url_download.c src/text.c src/list.c src/space.c src/fs_util.c src/json_util.c \
@@ -44,6 +44,12 @@ printf '%s\n' '== ASan/UBSan restart recovery =='
 WFM_SERVER_BIN="$repo/audit-bin/web-file-mgr-linux_asan" \
   ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
   ./tools/test_conversion_restart_recovery.sh
+WFM_SERVER_BIN="$repo/audit-bin/web-file-mgr-linux_asan" \
+  ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+  ./tools/test_exfat_restart_recovery.sh
+WFM_SERVER_BIN="$repo/audit-bin/web-file-mgr-linux_asan" \
+  ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+  ./tools/test_exfat_source_change_rejection.sh
 
 printf '%s\n' '== Valgrind native test =='
 valgrind --leak-check=full --show-leak-kinds=all --track-fds=yes \

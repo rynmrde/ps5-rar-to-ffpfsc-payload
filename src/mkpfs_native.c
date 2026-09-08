@@ -29,6 +29,10 @@
 #define PFSC_VERIFY_OFFSET_WINDOW 4096u
 #define EXFAT_MAX_TREE_NODES 262144u
 #define EXFAT_MAX_TREE_DEPTH 128u
+/* A checkpoint is made only after complete file records are durable.  This
+ * bounds rework after a payload restart without forcing an fsync per file. */
+#define EXFAT_CHECKPOINT_BYTES (128u * 1024u * 1024u)
+#define EXFAT_CHECKPOINT_FILES 4096u
 
 static int cancellation_requested(const atomic_int *cancel_requested) {
   return cancel_requested && atomic_load_explicit(cancel_requested,
@@ -1005,6 +1009,8 @@ typedef struct exfat_node {
   dev_t device;
   ino_t inode;
   uint64_t size;
+  int64_t mtime_sec;
+  long mtime_nsec;
   struct exfat_node **children;
   size_t child_count;
   size_t child_capacity;
@@ -1069,7 +1075,10 @@ static exfat_node_t *exfat_scan_tree(const char *path, const char *name, int roo
   if (!node) { *error_out = ENOMEM; return NULL; }
   (*node_count)++;
   node->name = strdup(name ? name : ""); node->path = strdup(path);
-  node->is_dir = root || S_ISDIR(st.st_mode); node->device = st.st_dev; node->inode = st.st_ino; node->size = node->is_dir ? 0 : (uint64_t)st.st_size;
+  node->is_dir = root || S_ISDIR(st.st_mode); node->device = st.st_dev;
+  node->inode = st.st_ino; node->size = node->is_dir ? 0 : (uint64_t)st.st_size;
+  node->mtime_sec = (int64_t)st.st_mtim.tv_sec;
+  node->mtime_nsec = st.st_mtim.tv_nsec;
   if (!node->is_dir && node->size > (uint64_t)(UINT32_MAX - 2u) * 65536u) { exfat_free_tree(node); *error_out = EFBIG; return NULL; }
   if (!node->name || !node->path) { exfat_free_tree(node); *error_out = ENOMEM; return NULL; }
   if (node->is_dir) {
@@ -1102,6 +1111,83 @@ static exfat_node_t *exfat_scan_tree(const char *path, const char *name, int roo
     }
   }
   return node;
+}
+
+static uint64_t
+exfat_hash_bytes(uint64_t hash, const void *data, size_t size) {
+  const unsigned char *bytes = data;
+
+  for(size_t i = 0; i < size; i++) {
+    hash ^= bytes[i];
+    hash *= UINT64_C(1099511628211);
+  }
+  return hash;
+}
+
+static uint64_t
+exfat_hash_u64(uint64_t hash, uint64_t value) {
+  unsigned char encoded[8];
+
+  put_u64le(encoded, value);
+  return exfat_hash_bytes(hash, encoded, sizeof(encoded));
+}
+
+/* This intentionally hashes source metadata, not source data.  It permits a
+ * restart without rereading a large source, while rejecting a renamed, resized,
+ * replaced, or modified file before its old stage bytes are reused. */
+static uint64_t
+exfat_tree_fingerprint_node(const exfat_node_t *node, uint64_t hash) {
+  unsigned char kind;
+  size_t name_length;
+
+  if(!node) return 0;
+  kind = node->is_dir ? 'D' : 'F';
+  name_length = strlen(node->name);
+  hash = exfat_hash_bytes(hash, &kind, sizeof(kind));
+  hash = exfat_hash_u64(hash, (uint64_t)name_length);
+  hash = exfat_hash_bytes(hash, node->name, name_length);
+  hash = exfat_hash_u64(hash, (uint64_t)node->device);
+  hash = exfat_hash_u64(hash, (uint64_t)node->inode);
+  hash = exfat_hash_u64(hash, node->size);
+  hash = exfat_hash_u64(hash, (uint64_t)node->mtime_sec);
+  hash = exfat_hash_u64(hash, (uint64_t)node->mtime_nsec);
+  hash = exfat_hash_u64(hash, (uint64_t)node->child_count);
+  for(size_t i = 0; i < node->child_count; i++) {
+    hash = exfat_tree_fingerprint_node(node->children[i], hash);
+  }
+  return hash;
+}
+
+static uint64_t
+exfat_tree_fingerprint(const exfat_node_t *root) {
+  return exfat_tree_fingerprint_node(root, UINT64_C(1469598103934665603));
+}
+
+static uint64_t
+exfat_tree_file_count(const exfat_node_t *node) {
+  uint64_t count = node && !node->is_dir ? 1u : 0u;
+
+  if(!node) return 0;
+  for(size_t i = 0; i < node->child_count; i++) {
+    uint64_t child_count = exfat_tree_file_count(node->children[i]);
+    if(UINT64_MAX - count < child_count) return UINT64_MAX;
+    count += child_count;
+  }
+  return count;
+}
+
+static int
+exfat_tree_file_bytes(const exfat_node_t *node, uint64_t *total) {
+  if(!node || !total) return EINVAL;
+  if(!node->is_dir) {
+    if(node->size > UINT64_MAX - *total) return EOVERFLOW;
+    *total += node->size;
+  }
+  for(size_t i = 0; i < node->child_count; i++) {
+    int rc = exfat_tree_file_bytes(node->children[i], total);
+    if(rc) return rc;
+  }
+  return 0;
 }
 
 static uint32_t exfat_ceil_clusters(uint64_t bytes) {
@@ -1216,17 +1302,75 @@ static void exfat_chain_tree(unsigned char *fat, const exfat_node_t *node) {
   for (size_t i = 0; i < node->child_count; i++) exfat_chain_tree(fat, node->children[i]);
 }
 
-static int exfat_write_file_data(FILE *out, const exfat_node_t *node, const atomic_int *cancel_requested, mkpfs_progress_callback progress, void *opaque, uint64_t *done, uint64_t total, uint32_t heap_offset, unsigned char *buffer) {
+static int
+exfat_checkpoint(FILE *out, mkpfs_resume_state_t *resume,
+                 mkpfs_resume_checkpoint_callback checkpoint,
+                 void *checkpoint_opaque) {
+  struct stat st;
+
+  if(!out || !resume || !checkpoint) return EINVAL;
+  if(fflush(out) != 0 || fsync(fileno(out)) != 0 ||
+     fstat(fileno(out), &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0) {
+    return EIO;
+  }
+  resume->exfat_stage_size = (uint64_t)st.st_size;
+  return checkpoint(resume, checkpoint_opaque) ? EIO : 0;
+}
+
+static int
+exfat_write_file_data(FILE *out, const exfat_node_t *node,
+                      const atomic_int *cancel_requested,
+                      mkpfs_progress_callback progress, void *opaque,
+                      uint64_t *done, uint64_t total, uint32_t heap_offset,
+                      unsigned char *buffer, uint64_t *file_index,
+                      mkpfs_resume_state_t *resume,
+                      mkpfs_resume_checkpoint_callback checkpoint,
+                      void *checkpoint_opaque, uint64_t *checkpoint_bytes,
+                      uint64_t *checkpoint_files) {
   if (node->is_dir) {
-    for (size_t i = 0; i < node->child_count; i++) { int rc = exfat_write_file_data(out, node->children[i], cancel_requested, progress, opaque, done, total, heap_offset, buffer); if (rc) return rc; }
+    for (size_t i = 0; i < node->child_count; i++) {
+      int rc = exfat_write_file_data(out, node->children[i], cancel_requested,
+                                     progress, opaque, done, total, heap_offset,
+                                     buffer, file_index, resume, checkpoint,
+                                     checkpoint_opaque, checkpoint_bytes,
+                                     checkpoint_files);
+      if(rc) return rc;
+    }
     return 0;
   }
-  if (!node->size) return 0;
+  if(!file_index) return EINVAL;
+  if(cancellation_requested(cancel_requested)) return ECANCELED;
+  if(resume && *file_index < resume->exfat_next_file) {
+    if(node->size > UINT64_MAX - *done) return EOVERFLOW;
+    *done += node->size;
+    if(UINT64_MAX == *file_index) return EOVERFLOW;
+    (*file_index)++;
+    return 0;
+  }
+  if(!node->size) {
+    if(UINT64_MAX == *file_index) return EOVERFLOW;
+    (*file_index)++;
+    if(resume) resume->exfat_next_file = *file_index;
+    if(resume && checkpoint && checkpoint_files &&
+       *file_index - *checkpoint_files >= EXFAT_CHECKPOINT_FILES) {
+      int rc = exfat_checkpoint(out, resume, checkpoint, checkpoint_opaque);
+      if(rc) return rc;
+      *checkpoint_files = *file_index;
+      if(checkpoint_bytes) *checkpoint_bytes = *done;
+    }
+    return 0;
+  }
   struct stat st;
   int fd;
   fd = open(node->path, O_RDONLY | O_NOFOLLOW);
   if (fd < 0) return errno;
-  if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_dev != node->device || st.st_ino != node->inode || (uint64_t)st.st_size != node->size) { close(fd); return ESTALE; }
+  if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_dev != node->device ||
+      st.st_ino != node->inode || (uint64_t)st.st_size != node->size ||
+      (int64_t)st.st_mtim.tv_sec != node->mtime_sec ||
+      st.st_mtim.tv_nsec != node->mtime_nsec) {
+    close(fd);
+    return ESTALE;
+  }
   FILE *in = fdopen(fd, "rb"); if (!in || !buffer) { if (in) fclose(in); else close(fd); return ENOMEM; }
   uint64_t offset;
   if (exfat_cluster_offset(heap_offset, node->first_cluster, &offset) ||
@@ -1239,8 +1383,28 @@ static int exfat_write_file_data(FILE *out, const exfat_node_t *node, const atom
     remaining -= got; *done += got;
     if (progress && progress(*done, total, "exfat", node->path, opaque)) { fclose(in); return ECANCELED; }
   }
-  int rc = write_zeros(out, (uint64_t)node->cluster_count * 65536u - node->size); fclose(in); return rc;
+  {
+    int rc = write_zeros(out, (uint64_t)node->cluster_count * 65536u - node->size);
+    fclose(in);
+    if(rc) return rc;
+  }
+  if(UINT64_MAX == *file_index) return EOVERFLOW;
+  (*file_index)++;
+  if(resume) resume->exfat_next_file = *file_index;
+  if(resume && checkpoint && checkpoint_bytes && checkpoint_files &&
+     (*done - *checkpoint_bytes >= EXFAT_CHECKPOINT_BYTES ||
+      *file_index - *checkpoint_files >= EXFAT_CHECKPOINT_FILES)) {
+    int rc = exfat_checkpoint(out, resume, checkpoint, checkpoint_opaque);
+    if(rc) return rc;
+    *checkpoint_bytes = *done;
+    *checkpoint_files = *file_index;
+  }
+  return 0;
 }
+
+/* Defined with the generic resumable PFS helpers below. */
+static int open_resume_stage(const char *path, FILE **out);
+static int remove_private_stage(const char *path);
 
 static int exfat_read_title_id(const char *source, char *out, size_t out_size) {
   char path[PATH_MAX]; char data[4096]; FILE *f; size_t n; const char *key, *value, *end;
@@ -1256,8 +1420,47 @@ static int exfat_read_title_id(const char *source, char *out, size_t out_size) {
   return 0;
 }
 
-static int exfat_write_folder(const char *source, const char *output, const atomic_int *cancel_requested, mkpfs_progress_callback progress, void *opaque, uint64_t *image_size) {
-  int error = 0; size_t node_count = 0; exfat_node_t *root = exfat_scan_tree(source, "/", 1, &error, &node_count, 0); FILE *out = NULL; unsigned char *fat = NULL; unsigned char boot[12 * 512]; uint32_t bitmap_clusters = 1, upcase_clusters, content_clusters, cluster_count, next_cluster, fat_entries, fat_sectors, heap_offset; uint64_t content_clusters64, volume_length, total_bytes = 0, done = 0; char temp[PATH_MAX];
+static int
+exfat_stage_header_matches(FILE *stage, uint64_t volume_length,
+                           uint32_t fat_sectors, uint32_t heap_offset,
+                           uint32_t cluster_count, uint32_t root_cluster) {
+  unsigned char boot[512];
+
+  if(!stage || fseeko(stage, 0, SEEK_SET) != 0 ||
+     read_all(stage, boot, sizeof(boot)) != 0) {
+    return 0;
+  }
+  return boot[0] == 0xEB && boot[1] == 0x76 && boot[2] == 0x90 &&
+         !memcmp(boot + 3, "EXFAT   ", 8) &&
+         get_u64le(boot + 72) == volume_length &&
+         get_u32le(boot + 80) == 128u &&
+         get_u32le(boot + 84) == fat_sectors &&
+         get_u32le(boot + 88) == heap_offset &&
+         get_u32le(boot + 92) == cluster_count &&
+         get_u32le(boot + 96) == root_cluster &&
+         get_u32le(boot + 100) == 0x4D6B5046u;
+}
+
+static int
+exfat_write_folder(const char *source, const char *output,
+                   const atomic_int *cancel_requested,
+                   mkpfs_progress_callback progress, void *opaque,
+                   uint64_t *image_size, mkpfs_resume_state_t *resume,
+                   mkpfs_resume_checkpoint_callback checkpoint,
+                   void *checkpoint_opaque) {
+  int error = 0;
+  size_t node_count = 0;
+  exfat_node_t *root = exfat_scan_tree(source, "/", 1, &error, &node_count, 0);
+  FILE *out = NULL;
+  unsigned char *fat = NULL;
+  unsigned char boot[12 * 512];
+  uint32_t bitmap_clusters = 1, upcase_clusters, content_clusters, cluster_count,
+           next_cluster, fat_entries, fat_sectors, heap_offset;
+  uint64_t content_clusters64, volume_length, total_bytes = 0, done = 0;
+  uint64_t file_index = 0, checkpoint_bytes = 0, checkpoint_files = 0;
+  uint64_t fingerprint, source_file_count;
+  int resumed = 0;
+  char temp[PATH_MAX];
   if (!root) return error ? error : EIO;
   upcase_clusters = (MKPFS_EXFAT_UPCASE_SIZE + 65535u) / 65536u;
   content_clusters64 = exfat_tree_clusters(root, 1) + upcase_clusters;
@@ -1268,27 +1471,173 @@ static int exfat_write_folder(const char *source, const char *output, const atom
   next_cluster = 2 + bitmap_clusters + upcase_clusters;
   exfat_assign_clusters(root, 1, &next_cluster);
   fat_entries = cluster_count + 2; fat_sectors = ((fat_entries * 4u + 511u) / 512u + 127u) / 128u * 128u; heap_offset = ((128u + fat_sectors + 127u) / 128u) * 128u; volume_length = (uint64_t)heap_offset + (uint64_t)cluster_count * 128u;
-  for (size_t i = 0; i < root->child_count; i++) total_bytes += root->children[i]->size;
-  if ((error = open_secure_temp_file(output, "exfat", temp, sizeof(temp), &out))) { exfat_free_tree(root); return error; }
-  memset(boot, 0, sizeof(boot)); boot[0] = 0xEB; boot[1] = 0x76; boot[2] = 0x90; memcpy(boot + 3, "EXFAT   ", 8); put_u64le(boot + 72, volume_length); put_u32le(boot + 80, 128); put_u32le(boot + 84, fat_sectors); put_u32le(boot + 88, heap_offset); put_u32le(boot + 92, cluster_count); put_u32le(boot + 96, root->first_cluster); put_u32le(boot + 100, 0x4D6B5046u); put_u16le(boot + 104, 0x0100); boot[108] = 9; boot[109] = 7; boot[110] = 1; boot[111] = 0x80; boot[112] = 0xFF; put_u16le(boot + 510, 0xAA55); for (int s = 1; s <= 8; s++) put_u32le(boot + s * 512 + 508, 0xAA550000u); uint32_t checksum = 0; for (size_t i = 0; i < 11 * 512; i++) if (i != 106 && i != 107 && i != 112) checksum = ((checksum << 31) | (checksum >> 1)) + boot[i]; for (int i = 11 * 512; i < 12 * 512; i += 4) put_u32le(boot + i, checksum);
-  if (write_all(out, boot, sizeof(boot)) || write_all(out, boot, sizeof(boot)) || write_zeros(out, (128u - 24u) * 512u)) { error = EIO; goto exfat_failed; }
-  fat = (unsigned char *)calloc(1, (size_t)fat_sectors * 512u); if (!fat) { error = ENOMEM; goto exfat_failed; } put_u32le(fat, 0xFFFFFFF8u); put_u32le(fat + 4, 0xFFFFFFFFu); exfat_chain(fat, 2, bitmap_clusters); exfat_chain(fat, 2 + bitmap_clusters, upcase_clusters); exfat_chain_tree(fat, root); if (write_all(out, fat, (size_t)fat_sectors * 512u) || write_zeros(out, (uint64_t)(heap_offset - 128u - fat_sectors) * 512u)) { error = EIO; goto exfat_failed; }
-  unsigned char *bitmap = (unsigned char *)calloc(1, (size_t)bitmap_clusters * 65536u); if (!bitmap) { error = ENOMEM; goto exfat_failed; } memset(bitmap, 0xFF, (size_t)((cluster_count + 7u) / 8u)); if (write_all(out, bitmap, (size_t)bitmap_clusters * 65536u) || write_all(out, mkpfs_exfat_upcase, MKPFS_EXFAT_UPCASE_SIZE) || write_zeros(out, (uint64_t)upcase_clusters * 65536u - MKPFS_EXFAT_UPCASE_SIZE)) { free(bitmap); error = EIO; goto exfat_failed; } free(bitmap);
-  if (exfat_write_directory(out, root, 1, bitmap_clusters, upcase_clusters, cluster_count, heap_offset) || exfat_write_directories(out, root, 1, bitmap_clusters, upcase_clusters, cluster_count, heap_offset)) { error = EIO; goto exfat_failed; }
+  if((error = exfat_tree_file_bytes(root, &total_bytes)) != 0) {
+    exfat_free_tree(root);
+    return error;
+  }
+  fingerprint = exfat_tree_fingerprint(root);
+  source_file_count = exfat_tree_file_count(root);
+  if(!fingerprint || source_file_count == UINT64_MAX) {
+    exfat_free_tree(root);
+    return EOVERFLOW;
+  }
+  if(resume) {
+    struct stat stage_st;
+
+    if(!checkpoint || resume->phase != MKPFS_RESUME_EXFAT) {
+      exfat_free_tree(root);
+      return EINVAL;
+    }
+    if(resume->exfat_next_file > resume->exfat_file_count ||
+       resume->exfat_file_count > source_file_count ||
+       (resume->exfat_source_fingerprint &&
+        resume->exfat_source_fingerprint != fingerprint) ||
+       (resume->exfat_next_file &&
+        resume->exfat_file_count != source_file_count)) {
+      exfat_free_tree(root);
+      return ESTALE;
+    }
+    if(resume->exfat_next_file) {
+      if(lstat(output, &stage_st) || !S_ISREG(stage_st.st_mode) ||
+         stage_st.st_nlink != 1 || stage_st.st_size <= 0 ||
+         !resume->exfat_stage_size ||
+         (uint64_t)stage_st.st_size != resume->exfat_stage_size ||
+         (uint64_t)stage_st.st_size > volume_length * 512u) {
+        exfat_free_tree(root);
+        return ESTALE;
+      }
+      if((error = open_resume_stage(output, &out)) != 0) {
+        exfat_free_tree(root);
+        return error;
+      }
+      if(!exfat_stage_header_matches(out, volume_length, fat_sectors,
+                                     heap_offset, cluster_count,
+                                     root->first_cluster)) {
+        fclose(out);
+        exfat_free_tree(root);
+        return ESTALE;
+      }
+      resumed = 1;
+      file_index = 0;
+      checkpoint_bytes = 0;
+      checkpoint_files = resume->exfat_next_file;
+    } else {
+      if((error = remove_private_stage(output)) != 0 ||
+         (error = open_resume_stage(output, &out)) != 0) {
+        exfat_free_tree(root);
+        return error;
+      }
+    }
+    resume->exfat_size = volume_length * 512u;
+    resume->exfat_file_count = source_file_count;
+    resume->exfat_source_fingerprint = fingerprint;
+  } else if ((error = open_secure_temp_file(output, "exfat", temp, sizeof(temp), &out))) {
+    exfat_free_tree(root);
+    return error;
+  }
+  if(!resumed) {
+    uint32_t checksum = 0;
+    unsigned char *bitmap;
+
+    memset(boot, 0, sizeof(boot)); boot[0] = 0xEB; boot[1] = 0x76;
+    boot[2] = 0x90; memcpy(boot + 3, "EXFAT   ", 8);
+    put_u64le(boot + 72, volume_length); put_u32le(boot + 80, 128);
+    put_u32le(boot + 84, fat_sectors); put_u32le(boot + 88, heap_offset);
+    put_u32le(boot + 92, cluster_count); put_u32le(boot + 96, root->first_cluster);
+    put_u32le(boot + 100, 0x4D6B5046u); put_u16le(boot + 104, 0x0100);
+    boot[108] = 9; boot[109] = 7; boot[110] = 1; boot[111] = 0x80;
+    boot[112] = 0xFF; put_u16le(boot + 510, 0xAA55);
+    for(int s = 1; s <= 8; s++) put_u32le(boot + s * 512 + 508, 0xAA550000u);
+    for(size_t i = 0; i < 11 * 512; i++) {
+      if(i != 106 && i != 107 && i != 112) {
+        checksum = ((checksum << 31) | (checksum >> 1)) + boot[i];
+      }
+    }
+    for(int i = 11 * 512; i < 12 * 512; i += 4) put_u32le(boot + i, checksum);
+    if(write_all(out, boot, sizeof(boot)) || write_all(out, boot, sizeof(boot)) ||
+       write_zeros(out, (128u - 24u) * 512u)) {
+      error = EIO;
+      goto exfat_failed;
+    }
+    fat = calloc(1, (size_t)fat_sectors * 512u);
+    if(!fat) { error = ENOMEM; goto exfat_failed; }
+    put_u32le(fat, 0xFFFFFFF8u); put_u32le(fat + 4, 0xFFFFFFFFu);
+    exfat_chain(fat, 2, bitmap_clusters);
+    exfat_chain(fat, 2 + bitmap_clusters, upcase_clusters);
+    exfat_chain_tree(fat, root);
+    if(write_all(out, fat, (size_t)fat_sectors * 512u) ||
+       write_zeros(out, (uint64_t)(heap_offset - 128u - fat_sectors) * 512u)) {
+      error = EIO;
+      goto exfat_failed;
+    }
+    bitmap = calloc(1, (size_t)bitmap_clusters * 65536u);
+    if(!bitmap) { error = ENOMEM; goto exfat_failed; }
+    memset(bitmap, 0xFF, (size_t)((cluster_count + 7u) / 8u));
+    if(write_all(out, bitmap, (size_t)bitmap_clusters * 65536u) ||
+       write_all(out, mkpfs_exfat_upcase, MKPFS_EXFAT_UPCASE_SIZE) ||
+       write_zeros(out, (uint64_t)upcase_clusters * 65536u -
+                        MKPFS_EXFAT_UPCASE_SIZE)) {
+      free(bitmap);
+      error = EIO;
+      goto exfat_failed;
+    }
+    free(bitmap);
+    if(exfat_write_directory(out, root, 1, bitmap_clusters, upcase_clusters,
+                             cluster_count, heap_offset) ||
+       exfat_write_directories(out, root, 1, bitmap_clusters, upcase_clusters,
+                               cluster_count, heap_offset)) {
+      error = EIO;
+      goto exfat_failed;
+    }
+    if(resume && (error = exfat_checkpoint(out, resume, checkpoint,
+                                           checkpoint_opaque)) != 0) {
+      goto exfat_failed;
+    }
+  }
   unsigned char *file_buffer = (unsigned char *)malloc(1024 * 1024);
   if (!file_buffer) { error = ENOMEM; goto exfat_failed; }
-  error = exfat_write_file_data(out, root, cancel_requested, progress, opaque, &done, total_bytes, heap_offset, file_buffer);
+  error = exfat_write_file_data(out, root, cancel_requested, progress, opaque,
+                                &done, total_bytes, heap_offset, file_buffer,
+                                &file_index, resume, checkpoint,
+                                checkpoint_opaque, &checkpoint_bytes,
+                                &checkpoint_files);
   free(file_buffer);
   if (error) goto exfat_failed;
-  if (fflush(out) != 0 || fsync(fileno(out)) != 0 || fclose(out) != 0 || rename(temp, output) != 0) { error = errno ? errno : EIO; unlink(temp); goto exfat_done; }
-  out = NULL; *image_size = volume_length * 512u; error = 0; goto exfat_done;
-exfat_failed: if (out) fclose(out); unlink(temp);
+  if(resume) {
+    resume->exfat_next_file = resume->exfat_file_count;
+    if((error = exfat_checkpoint(out, resume, checkpoint,
+                                 checkpoint_opaque)) != 0) {
+      goto exfat_failed;
+    }
+  }
+  if(fflush(out) != 0 || fsync(fileno(out)) != 0 || fclose(out) != 0) {
+    out = NULL;
+    error = errno ? errno : EIO;
+    if(!resume) unlink(temp);
+    goto exfat_done;
+  }
+  out = NULL;
+  if(resume) {
+    if((error = checkpoint(resume, checkpoint_opaque)) != 0) {
+      error = EIO;
+      goto exfat_done;
+    }
+  } else if(rename(temp, output) != 0) {
+    error = errno ? errno : EIO;
+    unlink(temp);
+    goto exfat_done;
+  }
+  *image_size = volume_length * 512u; error = 0; goto exfat_done;
+exfat_failed:
+  if(out) fclose(out);
+  if(!resume) unlink(temp);
 exfat_done: free(fat); exfat_free_tree(root); return error;
 }
 
 int mkpfs_build_exfat_folder(const char *source, const char *output_path, const atomic_int *cancel_requested, mkpfs_progress_callback progress, void *opaque) {
   uint64_t image_size = 0;
-  return exfat_write_folder(source, output_path, cancel_requested, progress, opaque, &image_size);
+  return exfat_write_folder(source, output_path, cancel_requested, progress,
+                            opaque, &image_size, NULL, NULL, NULL);
 }
 
 int mkpfs_convert_folder_progress(const char *source, const char *destination, const char *output_name, const mkpfs_native_options_t *options, const atomic_int *cancel_requested, mkpfs_progress_callback progress, void *opaque) {
@@ -1307,7 +1656,8 @@ int mkpfs_convert_folder_progress(const char *source, const char *destination, c
   if (exfat_read_title_id(normalized, title_id, sizeof(title_id)) == 0) {
     if (snprintf(inner_name, sizeof(inner_name), "%s.exfat", title_id) >= (int)sizeof(inner_name)) return ENAMETOOLONG;
   } else if (snprintf(inner_name, sizeof(inner_name), "%s.exfat", output_name) >= (int)sizeof(inner_name)) return ENAMETOOLONG;
-  rc = exfat_write_folder(normalized, exfat_temp, cancel_requested, progress, opaque, &exfat_size);
+  rc = exfat_write_folder(normalized, exfat_temp, cancel_requested, progress,
+                          opaque, &exfat_size, NULL, NULL, NULL);
   if (rc) { unlink(exfat_temp); return rc; }
   rc = mkpfs_wrap_exfat_file_ex(exfat_temp, output, inner_name, level, options ? options->workers : 0, cancel_requested, progress, opaque);
   unlink(exfat_temp);
@@ -1436,11 +1786,11 @@ mkpfs_convert_folder_resumable(
   }
 
   if(resume->phase == MKPFS_RESUME_EXFAT) {
-    if((rc = remove_private_stage(resume->exfat_path)) != 0) return rc;
-    if((rc = remove_private_stage(resume->pfs_path)) != 0) return rc;
     if((rc = exfat_write_folder(normalized, resume->exfat_path,
                                 cancel_requested, progress, progress_opaque,
-                                &resume->exfat_size)) != 0) return rc;
+                                &resume->exfat_size, resume, checkpoint,
+                                checkpoint_opaque)) != 0) return rc;
+    if((rc = remove_private_stage(resume->pfs_path)) != 0) return rc;
     resume->phase = MKPFS_RESUME_PACK;
     resume->pack_next_block = 0;
     resume->pack_stored_size = 0;

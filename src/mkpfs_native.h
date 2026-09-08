@@ -47,6 +47,13 @@ typedef struct mkpfs_resume_state {
   uint32_t phase;
   uint32_t reserved;
   uint64_t exfat_size;
+  /* The exFAT stage is resumable only at a fully synchronized file boundary.
+   * These values identify the exact immutable, sorted source tree captured by
+   * the staging image and the number of ordinary files it contains. */
+  uint64_t exfat_next_file;
+  uint64_t exfat_file_count;
+  uint64_t exfat_source_fingerprint;
+  uint64_t exfat_stage_size;
   uint64_t pack_next_block;
   uint64_t pack_stored_size;
   uint64_t verify_next_block;
