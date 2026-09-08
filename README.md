@@ -4,7 +4,6 @@ RAR to FFPFSC PS5 Payload is a userland payload for jailbroken PlayStation 5 con
 
 > **Important:** The product name does not mean that a RAR file can be converted directly to `.ffpfsc` in one step. The supported workflow is: extract the RAR or 7z archive to a folder, inspect the extracted files, and then convert that folder to `.ffpfsc`.
 
-> **Safety notice:** This payload performs userland file operations only. It does not add kernel patches, raw-device access, or a guarantee against PS5 system errors, including CE-108262-9. Begin with non-critical files and a small test folder. Keep backups of important data.
 
 ## Roadmap
 
