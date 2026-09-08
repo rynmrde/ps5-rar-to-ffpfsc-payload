@@ -1,30 +1,26 @@
 # RAR to FFPFSC PS5 Payload
 
+## Roadmap
+
+The developer's next project, **Windows on PS5**, is already prepared and will be publicly released when these support goals are reached: **$30 total support = release; $45 total support = completion and release within 10 days.** This is the developer's stated release commitment.
+
+## Support and donations
+
+| Network | Address |
+| --- | --- |
+| TON | `UQD80q4Pm-9cYzMmfB8rbgRrJAqRxuAmrbGm4GqFEgtdFSLL` |
+| Polygon (POL) | `0x0dE5511076bc70F489B1139485BbC73cd96cdc04` |
+| Solana | `A4FWhkKrUgEW3vZvsT19Koh5tWVCVK1LGw1Xwf9LQRLF` |
+| TRON | `TAhUU9RiB5VrUZ4z3cHYvnsGampig5aaEm` |
+
+If you would like to donate using another cryptocurrency that is not listed here, please contact us through the project's issue/contact section so we can add it. If you encounter any problem with a donation address or transaction, please report it there as well.
+
 **RAR to FFPFSC PS5 Payload** is a userland payload for jailbroken PlayStation 5 consoles. It combines a PS5 web file manager with native RAR/7z extraction, folder-to-`.ffpfsc` conversion compatible with MkPFS, and direct URL downloads. The browser interface is designed for phones, desktop browsers, and the PS5 browser with a controller.
 
 > **Important:** The product name does **not** mean that a RAR file can be converted directly to `.ffpfsc` in one step. The supported workflow is: **extract the RAR or 7z archive to a folder, inspect the extracted files, and then convert that folder to `.ffpfsc`.**
 
+
 > **Safety notice:** This payload performs userland file operations only. It does not add kernel patches, raw-device access, or a guarantee against PS5 system errors, including CE-108262-9. Begin with non-critical files and a small test folder. Keep backups of important data.
-
-## Contents
-
-- [What it does](#what-it-does)
-- [Requirements](#requirements)
-- [Installation and first launch](#installation-and-first-launch)
-- [Home Screen launcher](#home-screen-launcher)
-- [PS5 web UI and controller controls](#ps5-web-ui-and-controller-controls)
-- [File manager](#file-manager)
-- [Convert a folder to `.ffpfsc`](#convert-a-folder-to-ffpfsc)
-- [RAR/7z extraction and the RAR-to-FFPFSC workflow](#rar7z-extraction-and-the-rar-to-ffpfsc-workflow)
-- [URL downloader](#url-downloader)
-- [Settings, jobs, progress, and cancellation](#settings-jobs-progress-and-cancellation)
-- [FAQ and troubleshooting](#faq-and-troubleshooting)
-- [Features](#features)
-- [Limitations](#limitations)
-- [Building and testing](#building-and-testing)
-- [Credits and thanks](#credits-and-thanks)
-- [Roadmap](#roadmap)
-- [Support and donations](#support-and-donations)
 
 ## What it does
 
@@ -35,12 +31,6 @@
 | **RAR and 7z extraction** | Extracts supported `.rar`, legacy `.rNN`, `.7z`, and first `.7z.001` volumes with password and supported multipart handling through the embedded archive engine. |
 | **URL downloader** | Downloads a direct HTTP or HTTPS URL into a selected PS5 folder as a background job. It uses bounded streaming I/O, temporary output, cancellation cleanup, and overwrite protection. |
 | **Jobs panel** | Displays queued, running, completed, failed, and canceled operations, with progress, elapsed time, transfer speed, and estimated remaining time whenever the underlying operation can provide them. |
-
-## Requirements
-
-For normal use, you need a jailbroken PS5, an ELF payload loader compatible with the PS5 Payload SDK, a local network connection for browser control, and enough free space for the source data, temporary workspace, and final output.
-
-For a source build, you need a POSIX C/C++ toolchain, Python 3, `zlib`, `libmicrohttpd`, and a PS5 Payload SDK installation whose target prefix includes `zlib` and `libmicrohttpd`.[5] Host archive regression tests additionally use `7z`; real RAR fixture coverage uses `rar` and `unrar` when available. These host tools are not used by the PS5 payload.
 
 ## Installation and first launch
 
@@ -61,14 +51,6 @@ For a source build, you need a POSIX C/C++ toolchain, Python 3, `zlib`, `libmicr
 The default listening port is **6777**. A valid `WFM_PORT` environment value can explicitly select another port. If `WFM_PORT` is unset, empty, invalid, or `0`, the payload safely uses port 6777. The startup notification and managed launcher use the actual successfully bound port.
 
 If port 6777 is already occupied, the payload does not silently choose an unknown alternative. Free the port or configure a deliberate valid `WFM_PORT` override before loading the payload.
-
-## Home Screen launcher
-
-After the HTTP server starts successfully, the payload attempts to install or refresh only its managed Home Screen launcher entry, identified by `FMGR88888`. This is a protected **PS5 title ID**, not a network port.
-
-By default, the managed launcher opens `http://127.0.0.1:6777/`. When a valid `WFM_PORT` override is used, the launcher is generated with the actual bound port instead. The launcher is never installed before server readiness. Existing unrelated application metadata is not overwritten. A launcher-installation failure does not stop the file manager; use the network URL reported by the startup notification instead.
-
-Launcher visibility and PS5 installation permissions are target-hardware behaviors. They must be confirmed on a physical PS5.
 
 ## PS5 web UI and controller controls
 
@@ -178,44 +160,6 @@ Cancellation is cooperative. Conversion checks between streamed work units, extr
 - Path validation, traversal rejection, symlink safeguards, no-follow cleanup, collision checks, and same-directory atomic finalization.
 - English and Chinese UI strings with D-pad-friendly focus navigation.
 
-## Limitations
-
-The following must be verified on a physical PS5: Home Screen launcher appearance, filesystem permissions and mounts, SceHttp/TLS compatibility, internal-browser behavior, and long-running storage stability. This project cannot guarantee the absence of CE-108262-9 or any other PS5 error.
-
-Downloads are intentionally limited to direct HTTP/HTTPS GET requests. They do not support authentication, cookies, custom headers, redirects, resume, checksums, or concurrent transfers. Archive extraction is limited to formats and multipart patterns implemented by the bundled upstream decoder; arbitrary archive formats are not supported.
-
-Always begin with browsing, then a small non-critical extraction, conversion, or download. Verify the completed output before using large folders or important files.
-
-## Building and testing
-
-```sh
-# Host build and core functional tests
-make linux test-native test-archive test-url-download test-default-port
-./tools/smoke_http.sh
-./tools/test_archive_http.sh
-
-# Verify generated FFPFSC output with the upstream MkPFS verifier
-make compat-upstream MKPFS_UPSTREAM_ROOT=/path/to/MkPFS
-
-# Reproducible 4,000-small-file benchmark
-./tools/benchmark_small_files.sh
-
-# Reproducible 32,000-small-file finalization benchmark. It compiles the
-# recorded pre-optimization source, checks byte identity, and prints timings.
-make benchmark-finalization
-
-# Host-side memory, HTTP, and filesystem safety checks
-./audit-memory-safety.sh
-python3 audit-filesystem-api-safety.py
-python3 audit-http-robustness.py ./web-file-mgr-linux /tmp/http.log
-
-# PS5 target build after staging the SDK and target dependencies
-export PS5_PAYLOAD_SDK=/path/to/ps5-payload-sdk
-make
-```
-
-The PS5 target output is `rar-to-ffpfsc-ps5-payload.elf`.
-
 ## Credits and thanks
 
 This project is built on real upstream open-source work. Thank you to the maintainers and contributors of the following projects:
@@ -230,21 +174,6 @@ This project is built on real upstream open-source work. Thank you to the mainta
 | [GNU libmicrohttpd][6] | Embedded HTTP server. |
 
 Required licenses, notices, and attribution are retained in [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
-## Roadmap
-
-The developer's next project, **Windows on PS5**, is already prepared and will be publicly released when these support goals are reached: **$30 total support = release; $45 total support = completion and release within 10 days.** This is the developer's stated release commitment.
-
-## Support and donations
-
-| Network | Address |
-| --- | --- |
-| TON | `UQD80q4Pm-9cYzMmfB8rbgRrJAqRxuAmrbGm4GqFEgtdFSLL` |
-| Polygon (POL) | `0x0dE5511076bc70F489B1139485BbC73cd96cdc04` |
-| Solana | `A4FWhkKrUgEW3vZvsT19Koh5tWVCVK1LGw1Xwf9LQRLF` |
-| TRON | `TAhUU9RiB5VrUZ4z3cHYvnsGampig5aaEm` |
-
-If you would like to donate using another cryptocurrency that is not listed here, please contact us through the project's issue/contact section so we can add it. If you encounter any problem with a donation address or transaction, please report it there as well.
 
 ## References
 
