@@ -1713,6 +1713,384 @@ write_all_fd(int fd, const char *data, size_t size) {
   return 0;
 }
 
+#define CONVERSION_JOURNAL_VERSION 2u
+#define CONVERSION_JOURNAL_PREFIX "mkpfs-conversion-"
+#define CONVERSION_JOURNAL_SUFFIX ".resume"
+
+typedef struct conversion_journal {
+  char magic[8];
+  uint32_t version;
+  uint32_t size;
+  uint32_t compression_level;
+  uint32_t workers;
+  char source[PATH_MAX];
+  char destination[PATH_MAX];
+  char output_name[NAME_MAX];
+  mkpfs_resume_state_t resume;
+  uint64_t checksum;
+} conversion_journal_t;
+
+static uint64_t
+conversion_hash_bytes(uint64_t hash, const void *data, size_t size) {
+  const unsigned char *bytes = data;
+
+  for(size_t i = 0; i < size; i++) {
+    hash ^= bytes[i];
+    hash *= UINT64_C(1099511628211);
+  }
+  return hash;
+}
+
+static uint64_t
+conversion_journal_checksum(const conversion_journal_t *journal) {
+  return conversion_hash_bytes(UINT64_C(1469598103934665603), journal,
+                               offsetof(conversion_journal_t, checksum));
+}
+
+static const char *
+conversion_journal_directory(void) {
+  const char *configured = getenv("WFM_RESUME_DIR");
+
+  if(configured && configured[0] == '/') return configured;
+#ifdef __linux__
+  return "/tmp/mkpfs-resume";
+#else
+  return "/data/mkpfs-resume";
+#endif
+}
+
+static int
+ensure_conversion_journal_directory(void) {
+  const char *directory = conversion_journal_directory();
+  struct stat st;
+
+  if(mkdir(directory, 0700) && errno != EEXIST) return -1;
+  if(lstat(directory, &st) || !S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode)) {
+    errno = EINVAL;
+    return -1;
+  }
+  return 0;
+}
+
+static int
+conversion_journal_path(const char *output, char *path, size_t path_size) {
+  uint64_t hash;
+
+  if(!output || !path || ensure_conversion_journal_directory()) return -1;
+  hash = conversion_hash_bytes(UINT64_C(1469598103934665603), output,
+                               strlen(output) + 1);
+  if(snprintf(path, path_size, "%s/" CONVERSION_JOURNAL_PREFIX "%016llx" \
+              CONVERSION_JOURNAL_SUFFIX, conversion_journal_directory(),
+              (unsigned long long)hash) >= (int)path_size) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+  return 0;
+}
+
+static int
+conversion_journal_valid(const conversion_journal_t *journal) {
+  if(memcmp(journal->magic, "MKPFSR1", 7) ||
+     journal->version != CONVERSION_JOURNAL_VERSION ||
+     journal->size != sizeof(*journal) ||
+     journal->checksum != conversion_journal_checksum(journal) ||
+     !memchr(journal->source, 0, sizeof(journal->source)) ||
+     !memchr(journal->destination, 0, sizeof(journal->destination)) ||
+     !memchr(journal->output_name, 0, sizeof(journal->output_name)) ||
+     !memchr(journal->resume.inner_name, 0,
+             sizeof(journal->resume.inner_name)) ||
+     !memchr(journal->resume.exfat_path, 0,
+             sizeof(journal->resume.exfat_path)) ||
+     !memchr(journal->resume.pfs_path, 0, sizeof(journal->resume.pfs_path)) ||
+     journal->compression_level > 9 || journal->workers > 8 ||
+     journal->resume.phase < MKPFS_RESUME_EXFAT ||
+     journal->resume.phase > MKPFS_RESUME_PUBLISH) {
+    errno = EINVAL;
+    return -1;
+  }
+  return 0;
+}
+
+static int
+read_conversion_journal(const char *path, conversion_journal_t *journal) {
+  struct stat st;
+  int fd;
+  ssize_t got;
+
+  if(!path || !journal) {
+    errno = EINVAL;
+    return -1;
+  }
+  fd = open(path, O_RDONLY | O_NOFOLLOW);
+  if(fd < 0) return -1;
+  if(fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_nlink != 1 ||
+     st.st_size != (off_t)sizeof(*journal)) {
+    close(fd);
+    errno = EINVAL;
+    return -1;
+  }
+  got = read(fd, journal, sizeof(*journal));
+  if(close(fd) || got != (ssize_t)sizeof(*journal)) {
+    if(got >= 0) errno = EIO;
+    return -1;
+  }
+  return conversion_journal_valid(journal);
+}
+
+static int
+conversion_journal_stage_paths_valid(const char *journal_path,
+                                     const conversion_journal_t *journal,
+                                     char *note_path, size_t note_path_size) {
+  char destination[PATH_MAX];
+  char output[PATH_MAX];
+  char expected_journal[PATH_MAX];
+  char expected_exfat[PATH_MAX];
+  char expected_pfs[PATH_MAX];
+  uint64_t hash;
+
+  if(!journal_path || !journal || !note_path ||
+     mkpfs_normalize_path(journal->destination, destination,
+                          sizeof(destination)) ||
+     !relative_path_safe(journal->output_name) ||
+     strchr(journal->output_name, '/') ||
+     path_join(output, sizeof(output), destination, journal->output_name) ||
+     conversion_journal_path(output, expected_journal, sizeof(expected_journal)) ||
+     strcmp(journal_path, expected_journal)) {
+    return 0;
+  }
+  hash = conversion_hash_bytes(UINT64_C(1469598103934665603), output,
+                               strlen(output) + 1);
+  if(snprintf(expected_exfat, sizeof(expected_exfat),
+              "%s/.%s.mkpfs-%016llx.exfat.stage", destination,
+              journal->output_name, (unsigned long long)hash) >=
+              (int)sizeof(expected_exfat) ||
+     snprintf(expected_pfs, sizeof(expected_pfs),
+              "%s/.%s.mkpfs-%016llx.pfs.stage", destination,
+              journal->output_name, (unsigned long long)hash) >=
+              (int)sizeof(expected_pfs) ||
+     snprintf(note_path, note_path_size, "%s/.%s.mkpfs-conversion.incomplete",
+              destination, journal->output_name) >= (int)note_path_size ||
+     strcmp(journal->resume.exfat_path, expected_exfat) ||
+     strcmp(journal->resume.pfs_path, expected_pfs)) {
+    return 0;
+  }
+  return 1;
+}
+
+static void
+unlink_private_regular(const char *path, const char *label) {
+  struct stat st;
+
+  if(!path || !*path) return;
+  if(lstat(path, &st) == 0) {
+    if(S_ISREG(st.st_mode) && st.st_nlink == 1) {
+      if(unlink(path)) fprintf(stderr, "%s cleanup failed: %s\n", label,
+                               strerror(errno));
+    } else {
+      fprintf(stderr, "refusing unsafe %s cleanup: %s\n", label, path);
+    }
+  } else if(errno != ENOENT) {
+    fprintf(stderr, "%s inspection failed: %s\n", label, strerror(errno));
+  }
+}
+
+static void
+cleanup_unrecoverable_conversion_journal(const char *journal_path,
+                                         const conversion_journal_t *journal) {
+  char note_path[PATH_MAX];
+
+  if(!conversion_journal_stage_paths_valid(journal_path, journal, note_path,
+                                           sizeof(note_path))) return;
+  unlink_private_regular(journal->resume.exfat_path, "conversion exFAT stage");
+  unlink_private_regular(journal->resume.pfs_path, "conversion PFS stage");
+  unlink_private_regular(note_path, "conversion recovery note");
+  unlink_private_regular(journal_path, "conversion journal");
+}
+
+static int
+conversion_journal_has_final_output(const conversion_journal_t *journal) {
+  char destination[PATH_MAX];
+  char output[PATH_MAX];
+  struct stat st;
+
+  if(!journal || mkpfs_normalize_path(journal->destination, destination,
+                                      sizeof(destination)) ||
+     !relative_path_safe(journal->output_name) ||
+     strchr(journal->output_name, '/') ||
+     path_join(output, sizeof(output), destination, journal->output_name)) {
+    return 0;
+  }
+  return lstat(output, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static int
+write_conversion_journal(file_task_t *task) {
+  conversion_journal_t journal;
+  char temporary[PATH_MAX];
+  int fd;
+
+  if(!task || !task->conversion_journal[0]) {
+    errno = EINVAL;
+    return -1;
+  }
+  memset(&journal, 0, sizeof(journal));
+  memcpy(journal.magic, "MKPFSR1", 7);
+  journal.version = CONVERSION_JOURNAL_VERSION;
+  journal.size = sizeof(journal);
+  journal.compression_level = task->compression_level;
+  journal.workers = task->conversion_workers;
+  snprintf(journal.source, sizeof(journal.source), "%s", task->srcs[0]);
+  {
+    char parent[PATH_MAX];
+    if(path_dirname(task->dst, parent, sizeof(parent))) return -1;
+    snprintf(journal.destination, sizeof(journal.destination), "%s", parent);
+  }
+  snprintf(journal.output_name, sizeof(journal.output_name), "%s",
+           task->conversion_name);
+  journal.resume = task->conversion_resume;
+  journal.checksum = conversion_journal_checksum(&journal);
+  if(snprintf(temporary, sizeof(temporary), "%s.tmp.XXXXXX",
+              task->conversion_journal) >= (int)sizeof(temporary)) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+  fd = mkstemp(temporary);
+  if(fd < 0) return -1;
+  if(fchmod(fd, 0600) || write_all_fd(fd, (const char *)&journal,
+                                      sizeof(journal)) || fsync(fd)) {
+    int error = errno ? errno : EIO;
+    close(fd);
+    unlink(temporary);
+    errno = error;
+    return -1;
+  }
+  if(close(fd)) {
+    int error = errno ? errno : EIO;
+    unlink(temporary);
+    errno = error;
+    return -1;
+  }
+  if(rename(temporary, task->conversion_journal)) {
+    int error = errno ? errno : EIO;
+    unlink(temporary);
+    errno = error;
+    return -1;
+  }
+  return 0;
+}
+
+static int
+conversion_resume_checkpoint(const mkpfs_resume_state_t *resume, void *opaque) {
+  file_task_t *task = opaque;
+
+  if(!task || !resume) return -1;
+  if(resume != &task->conversion_resume) return -1;
+  return write_conversion_journal(task);
+}
+
+static void
+remove_conversion_journal(file_task_t *task) {
+  if(task->conversion_journal[0] && unlink(task->conversion_journal) &&
+     errno != ENOENT) {
+    fprintf(stderr, "conversion journal cleanup failed: %s\n", strerror(errno));
+  }
+  task->conversion_journal[0] = 0;
+}
+
+static int
+prepare_conversion_resume(file_task_t *task) {
+  char parent[PATH_MAX];
+  const char *base;
+  uint64_t hash;
+
+  if(!task || !task->srcs || task->src_count != 1 ||
+     path_dirname(task->dst, parent, sizeof(parent))) {
+    errno = EINVAL;
+    return -1;
+  }
+  if(task->conversion_journal[0]) return 0;
+  if(conversion_journal_path(task->dst, task->conversion_journal,
+                             sizeof(task->conversion_journal))) {
+    return -1;
+  }
+  base = path_basename(task->dst);
+  hash = conversion_hash_bytes(UINT64_C(1469598103934665603), task->dst,
+                               strlen(task->dst) + 1);
+  memset(&task->conversion_resume, 0, sizeof(task->conversion_resume));
+  task->conversion_resume.phase = MKPFS_RESUME_EXFAT;
+  if(!base[0] ||
+     snprintf(task->conversion_resume.exfat_path,
+              sizeof(task->conversion_resume.exfat_path),
+              "%s/.%s.mkpfs-%016llx.exfat.stage", parent, base,
+              (unsigned long long)hash) >=
+              (int)sizeof(task->conversion_resume.exfat_path) ||
+     snprintf(task->conversion_resume.pfs_path,
+              sizeof(task->conversion_resume.pfs_path),
+              "%s/.%s.mkpfs-%016llx.pfs.stage", parent, base,
+              (unsigned long long)hash) >=
+              (int)sizeof(task->conversion_resume.pfs_path)) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+  if(!task->conversion_name[0]) {
+    snprintf(task->conversion_name, sizeof(task->conversion_name), "%s", base);
+  }
+  return write_conversion_journal(task);
+}
+
+static void
+remove_conversion_private_stages(file_task_t *task) {
+  const char *paths[2];
+
+  if(!task) return;
+  paths[0] = task->conversion_resume.exfat_path;
+  paths[1] = task->conversion_resume.pfs_path;
+  for(size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+    struct stat st;
+    if(!paths[i][0]) continue;
+    if(lstat(paths[i], &st) == 0) {
+      if(S_ISREG(st.st_mode) && st.st_nlink == 1) {
+        if(unlink(paths[i])) {
+          fprintf(stderr, "conversion stage cleanup failed: %s\n", strerror(errno));
+        }
+      } else {
+        fprintf(stderr, "refusing unsafe conversion stage cleanup: %s\n", paths[i]);
+      }
+    } else if(errno != ENOENT) {
+      fprintf(stderr, "conversion stage inspect failed: %s\n", strerror(errno));
+    }
+  }
+}
+
+static int
+conversion_stage_bytes(const file_task_t *task, uint64_t *bytes_out) {
+  const char *paths[2];
+  uint64_t total = 0;
+
+  if(!task || !bytes_out) {
+    errno = EINVAL;
+    return -1;
+  }
+  paths[0] = task->conversion_resume.exfat_path;
+  paths[1] = task->conversion_resume.pfs_path;
+  for(size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+    struct stat st;
+    if(!paths[i][0]) continue;
+    if(lstat(paths[i], &st)) {
+      if(errno == ENOENT) continue;
+      return -1;
+    }
+    if(!S_ISREG(st.st_mode) || st.st_nlink != 1 || st.st_size < 0 ||
+       UINT64_MAX - total < (uint64_t)st.st_size) {
+      errno = EINVAL;
+      return -1;
+    }
+    total += (uint64_t)st.st_size;
+  }
+  *bytes_out = total;
+  return 0;
+}
+
 static int
 create_conversion_recovery_note(file_task_t *task) {
   char parent[PATH_MAX];
@@ -1725,26 +2103,32 @@ create_conversion_recovery_note(file_task_t *task) {
   base = path_basename(task->dst);
   if(!base[0] || snprintf(task->conversion_recovery_note,
                           sizeof(task->conversion_recovery_note),
-                          "%s/.%s.mkpfs-conversion-%lu.incomplete",
-                          parent, base, task->id) >=
+                          "%s/.%s.mkpfs-conversion.incomplete",
+                          parent, base) >=
                           (int)sizeof(task->conversion_recovery_note)) {
     errno = ENAMETOOLONG;
     return -1;
   }
   fd = open(task->conversion_recovery_note,
             O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
-  if(fd < 0) return -1;
+  if(fd < 0) {
+    struct stat st;
+    if(errno == EEXIST && lstat(task->conversion_recovery_note, &st) == 0 &&
+       S_ISREG(st.st_mode) && st.st_nlink == 1) {
+      return 0;
+    }
+    return -1;
+  }
   length = snprintf(message, sizeof(message),
                     "An MkPFS folder conversion is in progress.\n"
                     "Source: %s\n"
                     "Final output: %s\n"
-                    "Task: %lu\n"
-                    "If this note remains after the payload is no longer "
-                    "running, the conversion was interrupted. Do not use "
-                    "its incomplete temporary files. Remove only the "
-                    "temporary files associated with this final-output name "
-                    "after confirming that no active payload is using them.\n",
-                    task->src, task->dst, task->id);
+                    "Recovery journal: %s\n"
+                    "If this note remains after the payload restarts, the "
+                    "payload will validate the source and continue the last "
+                    "durably checkpointed conversion stage automatically. "
+                    "Do not use temporary files as final output.\n",
+                    task->src, task->dst, task->conversion_journal);
   if(length < 0 || (size_t)length >= sizeof(message) ||
      write_all_fd(fd, message, (size_t)length) || fsync(fd)) {
     int error = errno ? errno : EIO;
@@ -1835,6 +2219,11 @@ task_worker(void *arg) {
   task_update(task, TASK_RUNNING, "preparing", 0, NULL);
 
   if(task_cancel_requested(task)) {
+    if(task->op == TASK_CONVERT) {
+      remove_conversion_private_stages(task);
+      remove_conversion_journal(task);
+      remove_conversion_recovery_note(task);
+    }
     task_update(task, TASK_CANCELED, task->src, 0, "canceled");
     return NULL;
   }
@@ -1843,6 +2232,8 @@ task_worker(void *arg) {
     mkpfs_native_options_t options = {0};
     conversion_progress_ctx_t progress = {.task = task};
     uint64_t workspace = 0;
+    uint64_t existing_stage_bytes = 0;
+    uint64_t durable_exfat_size = 0;
     unsigned long long available = 0;
     char output_dir[PATH_MAX];
     char *output_name;
@@ -1855,29 +2246,72 @@ task_worker(void *arg) {
       output_name = output_dir;
       snprintf(output_dir, sizeof(output_dir), ".");
     }
-    if (mkpfs_scan_folder(task->srcs[0], &scan)) {
+    if(task->conversion_recovered &&
+       task->conversion_resume.phase >= MKPFS_RESUME_PACK) {
+      struct stat stage_st;
+      if(lstat(task->conversion_resume.exfat_path, &stage_st) ||
+         !S_ISREG(stage_st.st_mode) || stage_st.st_nlink != 1 ||
+         stage_st.st_size <= 0) {
+        ret = ESTALE;
+        task_set_error_code(task, "resume_stage", task->dst);
+      } else {
+        durable_exfat_size = (uint64_t)stage_st.st_size;
+        ret = mkpfs_estimate_workspace_from_exfat(durable_exfat_size, &workspace);
+      }
+    } else if (mkpfs_scan_folder(task->srcs[0], &scan)) {
       ret = errno ? errno : EIO;
     } else if((ret = mkpfs_estimate_conversion_workspace(&scan, &workspace)) != 0) {
       task_set_error_code(task, "conversion_size", task->srcs[0]);
-    } else if(target_available_space(output_dir, &available)) {
+    }
+    if(!ret && target_available_space(output_dir, &available)) {
       ret = errno ? errno : EIO;
       task_set_error_code(task, "space_check_failed", output_dir);
-    } else if(available < workspace) {
+    }
+    if(!ret && task->conversion_recovered &&
+       conversion_stage_bytes(task, &existing_stage_bytes)) {
+      ret = errno ? errno : EIO;
+      task_set_error_code(task, "resume_stage", task->dst);
+    }
+    if(!ret && available < workspace &&
+       (UINT64_MAX - available < existing_stage_bytes ||
+        available + existing_stage_bytes < workspace)) {
       ret = ENOSPC;
       task_set_error_code(task, "no_space", output_dir);
-    } else {
-      progress.total = scan.total_bytes ? scan.total_bytes * 2 + 1 : 1;
+    }
+    if(!ret) {
+      if(durable_exfat_size) {
+        progress.total = durable_exfat_size > (ULLONG_MAX - 1u) / 2u ?
+                         ULLONG_MAX : durable_exfat_size * 2u + 1u;
+      } else if(scan.total_bytes > (ULLONG_MAX - 1u) / 2u) {
+        progress.total = ULLONG_MAX;
+      } else {
+        progress.total = scan.total_bytes ? scan.total_bytes * 2u + 1u : 1u;
+      }
       task_set_total(task, progress.total);
       options.compression_level = task->compression_level <= 9 ? task->compression_level : 7;
       options.workers = task->conversion_workers;
       options.compression = 1; options.verify = 1; options.verify_structure = 1;
-      task_update(task, TASK_RUNNING, "native conversion", 0, NULL);
-      if(create_conversion_recovery_note(task)) {
+      {
+        /* Once exFAT is durable, packing and verification read only that
+         * immutable private stage.  Re-scanning a large source tree here
+         * adds hours without improving recovery safety.  An EXFAT-stage
+         * restart intentionally rebuilds the snapshot from the current
+         * source and each file read still checks inode, device, and size. */
+        if(prepare_conversion_resume(task)) {
         ret = errno ? errno : EIO;
-      } else {
-        ret = mkpfs_convert_folder_progress(task->srcs[0], output_dir, output_name,
-                                             &options, &task->cancel_requested,
-                                             conversion_progress, &progress);
+        task_set_error_code(task, "resume_journal", task->dst);
+        } else if(create_conversion_recovery_note(task)) {
+        ret = errno ? errno : EIO;
+        task_set_error_code(task, "resume_note", task->dst);
+        } else {
+        task_update(task, TASK_RUNNING,
+                    task->conversion_recovered ? "resuming conversion" :
+                    "native conversion", 0, NULL);
+        ret = mkpfs_convert_folder_resumable(
+          task->srcs[0], output_dir, output_name, &options,
+          &task->cancel_requested, conversion_progress, &progress,
+          &task->conversion_resume, conversion_resume_checkpoint, task);
+        }
       }
     }
   }
@@ -2070,13 +2504,29 @@ task_worker(void *arg) {
     }
   }
 
-  remove_conversion_recovery_note(task);
   if(ret) {
     errno = ret;
     if(errno == ECANCELED || task_cancel_requested(task)) {
+      if(task->op == TASK_CONVERT) {
+        remove_conversion_private_stages(task);
+        remove_conversion_journal(task);
+        remove_conversion_recovery_note(task);
+      }
       task_update(task, TASK_CANCELED, task->current[0] ? task->current : task->src,
                   0, "canceled");
     } else {
+      if(task->op == TASK_CONVERT && task->conversion_recovered &&
+         (errno == ESTALE || errno == EINVAL)) {
+        /* Do not retry a checkpoint whose input changed or whose private
+         * staging structure cannot be validated.  It can otherwise consume
+         * space indefinitely after every payload restart. */
+        remove_conversion_private_stages(task);
+        remove_conversion_journal(task);
+        remove_conversion_recovery_note(task);
+        task_set_error_code(task, errno == ESTALE ? "resume_source_changed" :
+                                                "resume_checkpoint_invalid",
+                            task->src);
+      }
       if(task->op == TASK_CHMOD) {
         task_set_error_code(task, "chmod_failed",
                             task->current[0] ? task->current : task->src);
@@ -2086,6 +2536,11 @@ task_worker(void *arg) {
     }
   } else {
     time_t completed_at = time(NULL);
+    if(task->op == TASK_CONVERT) {
+      remove_conversion_private_stages(task);
+      remove_conversion_journal(task);
+      remove_conversion_recovery_note(task);
+    }
     pthread_mutex_lock(&g_tasks_lock);
     if (task->op == TASK_CONVERT || task->op == TASK_EXTRACT ||
         task->op == TASK_URL_DOWNLOAD)
@@ -2100,6 +2555,126 @@ task_worker(void *arg) {
   }
 
   return NULL;
+}
+
+static file_task_t *
+task_from_conversion_journal(const char *path, const conversion_journal_t *journal) {
+  file_task_t *task;
+  char output[PATH_MAX];
+  char normalized_source[PATH_MAX];
+  char normalized_destination[PATH_MAX];
+  char expected_journal[PATH_MAX];
+  struct stat source_st;
+  struct stat destination_st;
+  struct stat output_st;
+  int source_required;
+
+  if(!path || !journal || mkpfs_normalize_path(journal->source, normalized_source,
+                                               sizeof(normalized_source)) ||
+     mkpfs_normalize_path(journal->destination, normalized_destination,
+                          sizeof(normalized_destination)) ||
+     !relative_path_safe(journal->output_name) ||
+     strchr(journal->output_name, '/') ||
+     path_join(output, sizeof(output), normalized_destination,
+               journal->output_name) ||
+     conversion_journal_path(output, expected_journal, sizeof(expected_journal)) ||
+     strcmp(path, expected_journal) || lstat(normalized_destination, &destination_st) ||
+     !S_ISDIR(destination_st.st_mode) ||
+     lstat(output, &output_st) == 0 || errno != ENOENT) {
+    return NULL;
+  }
+  source_required = journal->resume.phase == MKPFS_RESUME_EXFAT;
+  if((source_required && (lstat(normalized_source, &source_st) ||
+                          !S_ISDIR(source_st.st_mode)))) {
+    return NULL;
+  }
+  task = calloc(1, sizeof(*task));
+  if(!task) return NULL;
+  task->srcs = calloc(1, sizeof(*task->srcs));
+  if(!task->srcs || !(task->srcs[0] = strdup(normalized_source))) {
+    free_task(task);
+    return NULL;
+  }
+  atomic_init(&task->cancel_requested, 0);
+  task->src_count = 1;
+  task->op = TASK_CONVERT;
+  task->state = TASK_QUEUED;
+  task->compression_level = journal->compression_level;
+  task->conversion_workers = journal->workers;
+  task->conversion_resume = journal->resume;
+  task->conversion_recovered = 1;
+  snprintf(task->src, sizeof(task->src), "%s", normalized_source);
+  snprintf(task->dst, sizeof(task->dst), "%s", output);
+  snprintf(task->conversion_name, sizeof(task->conversion_name), "%s",
+           journal->output_name);
+  snprintf(task->conversion_journal, sizeof(task->conversion_journal), "%s", path);
+  task->created_at = task->updated_at = time(NULL);
+  return task;
+}
+
+int
+filemgr_resume_interrupted_conversions(void) {
+  DIR *directory;
+  struct dirent *entry;
+  file_task_t *task = NULL;
+  char selected[PATH_MAX] = {0};
+
+  if(ensure_conversion_journal_directory()) {
+    fprintf(stderr, "conversion recovery directory unavailable: %s\n",
+            strerror(errno));
+    return -1;
+  }
+  directory = opendir(conversion_journal_directory());
+  if(!directory) return -1;
+  while((entry = readdir(directory)) != NULL) {
+    char path[PATH_MAX];
+    conversion_journal_t journal;
+    size_t name_length = strlen(entry->d_name);
+
+    if(strncmp(entry->d_name, CONVERSION_JOURNAL_PREFIX,
+               strlen(CONVERSION_JOURNAL_PREFIX)) ||
+       name_length <= strlen(CONVERSION_JOURNAL_PREFIX) +
+                      strlen(CONVERSION_JOURNAL_SUFFIX) ||
+       strcmp(entry->d_name + name_length - strlen(CONVERSION_JOURNAL_SUFFIX),
+              CONVERSION_JOURNAL_SUFFIX) ||
+       snprintf(path, sizeof(path), "%s/%s", conversion_journal_directory(),
+                entry->d_name) >= (int)sizeof(path) ||
+       read_conversion_journal(path, &journal)) {
+      continue;
+    }
+    task = task_from_conversion_journal(path, &journal);
+    if(!task && conversion_journal_has_final_output(&journal)) {
+      /* A process can die after atomic publication and before it removes the
+       * journal.  The completed output wins; reclaim only matching private
+       * stages whose deterministic paths were validated from the journal. */
+      cleanup_unrecoverable_conversion_journal(path, &journal);
+      continue;
+    }
+    if(task) {
+      snprintf(selected, sizeof(selected), "%s", path);
+      break;
+    }
+  }
+  closedir(directory);
+  if(!task) return 0;
+
+  pthread_mutex_lock(&g_tasks_lock);
+  if(has_active_task_locked()) {
+    pthread_mutex_unlock(&g_tasks_lock);
+    free_task(task);
+    return 0;
+  }
+  task->id = g_next_task_id++;
+  task->next = g_tasks;
+  g_tasks = task;
+  pthread_mutex_unlock(&g_tasks_lock);
+  if(pthread_create(&task->thread, NULL, task_worker, task)) {
+    task_update(task, TASK_FAILED, NULL, 0, "recovery worker creation failed");
+    return -1;
+  }
+  pthread_detach(task->thread);
+  fprintf(stderr, "resuming interrupted conversion from %s\n", selected);
+  return 1;
 }
 
 static enum MHD_Result

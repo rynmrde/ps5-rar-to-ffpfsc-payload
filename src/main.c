@@ -13,6 +13,7 @@
 #endif
 
 #include "app_installer.h"
+#include "filemgr.h"
 #include "notify.h"
 #include "websrv.h"
 
@@ -70,6 +71,11 @@ main(int argc, char **argv) {
 
   signal(SIGPIPE, SIG_IGN);
   signal(SIGCHLD, SIG_IGN);
+
+  if(filemgr_resume_interrupted_conversions() < 0) {
+    fputs("interrupted conversion recovery scan failed; server remains available\n",
+          stderr);
+  }
 
   while(1) {
     port = configured_port();

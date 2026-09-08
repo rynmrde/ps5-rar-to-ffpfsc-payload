@@ -9,8 +9,10 @@ printf '%s\n' '== ASan/UBSan native tools =='
 SAN='-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -Wall -Werror -Isrc'
 SAN_CXX='-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -Wall'
 clang-18 $SAN -o audit-bin/test_mkpfs_native_asan tests/test_mkpfs_native.c src/mkpfs_native.c -lz -pthread
+clang-18 $SAN -o audit-bin/test_mkpfs_resume_asan tests/test_mkpfs_resume.c src/mkpfs_native.c -lz -pthread
 clang-18 $SAN -o audit-bin/mkpfs-convert-folder_asan tools/mkpfs-convert-folder.c src/mkpfs_native.c -lz -pthread
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ./audit-bin/test_mkpfs_native_asan
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ./audit-bin/test_mkpfs_resume_asan
 
 printf '%s\n' '== ASan/UBSan full Linux server =='
 make -C third_party/unrar-ps5 clean
@@ -21,7 +23,7 @@ clang++-18 -x c $SAN -o audit-bin/test_archive_extract_asan tests/test_archive_e
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
   ARCHIVE_TEST_BIN="$repo/audit-bin/test_archive_extract_asan" ./tests/test_archive_extract.sh
 clang++-18 -x c $SAN $(pkg-config --cflags libmicrohttpd) \
-  -DVERSION_TAG='"v0.3.5"' -DTITLE_ID='"FMGR88888"' \
+  -DVERSION_TAG='"v0.3.6"' -DTITLE_ID='"FMGR88888"' \
   -o audit-bin/web-file-mgr-linux_asan \
   src/main.c src/websrv.c src/filemgr.c src/file_response.c src/task.c src/upload.c \
   src/download.c src/url_download.c src/text.c src/list.c src/space.c src/fs_util.c src/json_util.c \
@@ -37,6 +39,11 @@ WFM_SERVER_BIN="$repo/audit-bin/web-file-mgr-linux_asan" WFM_PORT=18084 \
 
 printf '%s\n' '== Standard HTTP conversion smoke =='
 WFM_PORT=18080 ./tools/smoke_http.sh
+
+printf '%s\n' '== ASan/UBSan restart recovery =='
+WFM_SERVER_BIN="$repo/audit-bin/web-file-mgr-linux_asan" \
+  ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+  ./tools/test_conversion_restart_recovery.sh
 
 printf '%s\n' '== Valgrind native test =='
 valgrind --leak-check=full --show-leak-kinds=all --track-fds=yes \

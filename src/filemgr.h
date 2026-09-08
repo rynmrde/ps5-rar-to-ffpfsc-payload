@@ -13,3 +13,4 @@ enum MHD_Result filemgr_upload_finish(struct MHD_Connection *conn,
                                       void *upload_ctx);
 void filemgr_upload_free(void *upload_ctx);
 void filemgr_cancel_and_wait_for_tasks(void);
+int filemgr_resume_interrupted_conversions(void);

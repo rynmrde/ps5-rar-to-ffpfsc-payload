@@ -1,4 +1,4 @@
-ifneq ($(filter-out linux linux-deps test-native test-archive test-url-download test-default-port benchmark-finalization archive-lib mkpfs-pfsc mkpfs-wrap-exfat mkpfs-exfat mkpfs-convert-folder compat-upstream clean,$(MAKECMDGOALS)),)
+ifneq ($(filter-out linux linux-deps test-native test-resume test-conversion-recovery test-archive test-url-download test-default-port benchmark-finalization archive-lib mkpfs-pfsc mkpfs-wrap-exfat mkpfs-exfat mkpfs-convert-folder compat-upstream clean,$(MAKECMDGOALS)),)
   ifdef PS5_PAYLOAD_SDK
     include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
   else
@@ -13,7 +13,7 @@ ifeq ($(MAKECMDGOALS),)
   endif
 endif
 
-VERSION_TAG := v0.3.5
+VERSION_TAG := v0.3.6
 TITLE_ID    := FMGR88888
 PYTHON      ?= python3
 STRIP       ?= $(PS5_PAYLOAD_SDK)/bin/prospero-strip
@@ -48,7 +48,7 @@ LINUX_CFLAGS := -O2 -flto -Wall -Werror -Isrc -DVERSION_TAG=\"$(VERSION_TAG)\" -
 LINUX_CFLAGS += `$(HOST_PKG_CONFIG) libmicrohttpd --cflags`
 LINUX_LDADD := `$(HOST_PKG_CONFIG) libmicrohttpd --libs` -pthread -lz -lstdc++
 
-.PHONY: all linux test-native test-archive test-url-download test-default-port benchmark-finalization mkpfs-pfsc mkpfs-wrap-exfat mkpfs-exfat mkpfs-convert-folder compat-upstream deps linux-deps archive-lib clean
+.PHONY: all linux test-native test-resume test-conversion-recovery test-archive test-url-download test-default-port benchmark-finalization mkpfs-pfsc mkpfs-wrap-exfat mkpfs-exfat mkpfs-convert-folder compat-upstream deps linux-deps archive-lib clean
 
 all: deps $(BIN)
 
@@ -60,6 +60,12 @@ archive-lib:
 
 test-native: tests/test_mkpfs_native
 	./tests/test_mkpfs_native
+
+test-resume: tests/test_mkpfs_resume
+	./tests/test_mkpfs_resume
+
+test-conversion-recovery: linux
+	./tools/test_conversion_restart_recovery.sh
 
 test-archive: tests/test_archive_extract
 	./tests/test_archive_extract.sh
@@ -93,7 +99,7 @@ gen:
 
 clean:
 	$(MAKE) -C $(ARCHIVE_DIR) clean
-	rm -rf $(BIN) $(LEGACY_BIN) $(LINUX_BIN) tests/test_mkpfs_native tests/test_archive_extract tools/mkpfs-pfsc tools/mkpfs-wrap-exfat tools/mkpfs-exfat tools/mkpfs-convert-folder gen
+	rm -rf $(BIN) $(LEGACY_BIN) $(LINUX_BIN) tests/test_mkpfs_native tests/test_mkpfs_resume tests/test_archive_extract tools/mkpfs-pfsc tools/mkpfs-wrap-exfat tools/mkpfs-exfat tools/mkpfs-convert-folder gen
 
 gen/%.c: assets/% gen-asset-module.py | gen
 	$(PYTHON) gen-asset-module.py --path $* $< > $@
@@ -108,6 +114,9 @@ $(LINUX_BIN): archive-lib $(LINUX_SRCS) $(GEN_SRCS)
 
 tests/test_mkpfs_native: tests/test_mkpfs_native.c src/mkpfs_native.c src/mkpfs_native.h
 	$(HOST_CC) -O2 -Wall -Werror -Isrc -o $@ tests/test_mkpfs_native.c src/mkpfs_native.c -lz -pthread
+
+tests/test_mkpfs_resume: tests/test_mkpfs_resume.c src/mkpfs_native.c src/mkpfs_native.h
+	$(HOST_CC) -O2 -Wall -Werror -Isrc -o $@ tests/test_mkpfs_resume.c src/mkpfs_native.c -lz -pthread
 
 tests/test_archive_extract: archive-lib tests/test_archive_extract.c src/archive_extract.h
 	$(HOST_CC) -O2 -Wall -Werror -Isrc -o $@ tests/test_archive_extract.c -Wl,--whole-archive $(ARCHIVE_LIB) -Wl,--no-whole-archive -pthread -lstdc++

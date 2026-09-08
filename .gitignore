@@ -6,6 +6,7 @@
 /audit-bin/
 /audit-logs/
 /tests/test_mkpfs_native
+/tests/test_mkpfs_resume
 /tests/test_archive_extract
 /tools/mkpfs-convert-folder
 /tools/mkpfs-exfat

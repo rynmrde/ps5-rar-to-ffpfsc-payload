@@ -148,6 +148,37 @@ int mkpfs_scan_folder(const char *root, mkpfs_scan_result_t *result) {
   memset(result, 0, sizeof(*result)); return scan_dir(root, result);
 }
 
+static int
+estimate_workspace_from_exfat(uint64_t exfat_bytes, uint64_t *bytes_out) {
+  uint64_t block_count;
+  uint64_t offsets_bytes;
+  uint64_t pfsc_data_offset;
+  uint64_t pfs_bytes;
+  uint64_t peak_bytes;
+  int rc;
+
+  if(!exfat_bytes || exfat_bytes % PFSC_BLOCK_SIZE || !bytes_out) return EINVAL;
+  block_count = exfat_bytes / PFSC_BLOCK_SIZE;
+  if(block_count > (UINT64_MAX / sizeof(uint64_t)) - 1u) return EOVERFLOW;
+  offsets_bytes = (block_count + 1u) * sizeof(uint64_t);
+  if(offsets_bytes > PFSC_MAX_OFFSETS_BYTES) return EFBIG;
+  if(offsets_bytes > UINT64_MAX - PFSC_OFFSETS_OFFSET -
+                     (PFSC_BLOCK_SIZE - 1u)) return EOVERFLOW;
+  pfsc_data_offset = align_up_u64(PFSC_OFFSETS_OFFSET + offsets_bytes,
+                                  PFSC_BLOCK_SIZE);
+  /* A PFSC block can be stored uncompressed, so this is its maximum size. */
+  if((rc = add_u64_checked(pfsc_data_offset, exfat_bytes, &pfs_bytes)) ||
+     (rc = add_u64_checked(pfs_bytes, 6u * PFSC_BLOCK_SIZE, &pfs_bytes)) ||
+     (rc = add_u64_checked(exfat_bytes, pfs_bytes, &peak_bytes))) return rc;
+  *bytes_out = peak_bytes;
+  return 0;
+}
+
+int
+mkpfs_estimate_workspace_from_exfat(uint64_t exfat_bytes, uint64_t *bytes_out) {
+  return estimate_workspace_from_exfat(exfat_bytes, bytes_out);
+}
+
 int mkpfs_estimate_conversion_workspace(const mkpfs_scan_result_t *scan,
                                         uint64_t *bytes_out) {
   uint64_t padded_file_bytes;
@@ -162,11 +193,6 @@ int mkpfs_estimate_conversion_workspace(const mkpfs_scan_result_t *scan,
   uint64_t fat_sectors;
   uint64_t heap_offset_sectors;
   uint64_t exfat_bytes;
-  uint64_t block_count;
-  uint64_t offsets_bytes;
-  uint64_t pfsc_data_offset;
-  uint64_t pfs_bytes;
-  uint64_t peak_bytes;
   int rc;
 
   if (!scan || !bytes_out) return EINVAL;
@@ -240,21 +266,7 @@ int mkpfs_estimate_conversion_workspace(const mkpfs_scan_result_t *scan,
       (rc = add_u64_checked(exfat_bytes, heap_offset_sectors, &exfat_bytes)) ||
       (rc = multiply_u64_checked(exfat_bytes, 512u, &exfat_bytes))) return rc;
 
-  block_count = (exfat_bytes + PFSC_BLOCK_SIZE - 1u) / PFSC_BLOCK_SIZE;
-  if (block_count > (UINT64_MAX / sizeof(uint64_t)) - 1u) return EOVERFLOW;
-  offsets_bytes = (block_count + 1u) * sizeof(uint64_t);
-  if (offsets_bytes > PFSC_MAX_OFFSETS_BYTES) return EFBIG;
-  if (offsets_bytes > UINT64_MAX - PFSC_OFFSETS_OFFSET -
-                      (PFSC_BLOCK_SIZE - 1u)) return EOVERFLOW;
-  pfsc_data_offset = align_up_u64(PFSC_OFFSETS_OFFSET + offsets_bytes,
-                                  PFSC_BLOCK_SIZE);
-  /* A PFSC block can be stored uncompressed, so this is its maximum size. */
-  if ((rc = add_u64_checked(pfsc_data_offset, exfat_bytes, &pfs_bytes)) ||
-      (rc = add_u64_checked(pfs_bytes, 6u * PFSC_BLOCK_SIZE, &pfs_bytes)) ||
-      (rc = add_u64_checked(exfat_bytes, pfs_bytes, &peak_bytes))) return rc;
-
-  *bytes_out = peak_bytes;
-  return 0;
+  return estimate_workspace_from_exfat(exfat_bytes, bytes_out);
 }
 
 static int write_zeros(FILE *out, uint64_t count) {
@@ -366,9 +378,16 @@ static int pack_pfsc_into_stream(const char *input_path, FILE *out, uint64_t bas
                                  int compression_level, unsigned int requested_workers,
                                  const atomic_int *cancel_requested,
                                  mkpfs_progress_callback progress, void *opaque,
-                                 uint64_t *stored_size_out) {
+                                 uint64_t *stored_size_out,
+                                 mkpfs_resume_state_t *resume,
+                                 mkpfs_resume_checkpoint_callback checkpoint,
+                                 void *checkpoint_opaque) {
   struct stat st; FILE *in = NULL;
-  uint64_t *offsets = NULL; uint64_t logical_size, block_count, offsets_bytes, data_offset, stored_pos, last_reported = 0; int rc = 0;
+  uint64_t *offsets = NULL; uint64_t logical_size, block_count, offsets_bytes, data_offset, stored_pos, last_reported = 0;
+  uint64_t next_dispatch = 0, next_write = 0;
+  uint64_t resumed_blocks = 0;
+  uint64_t checkpoint_from = 0;
+  int rc = 0;
   pfsc_pool_t pool = {0}; pthread_t *threads = NULL; int threads_started = 0;
   int pool_initialized = 0;
   unsigned char *write_buffer = NULL;
@@ -388,9 +407,33 @@ static int pack_pfsc_into_stream(const char *input_path, FILE *out, uint64_t bas
   if (!write_buffer) { rc = ENOMEM; goto failed; }
   unsigned char header[PFSC_HEADER_SIZE] = {0};
   put_u32le(header + 0x00, PFSC_MAGIC); put_u32le(header + 0x04, PFSC_UNK4); put_u32le(header + 0x08, PFSC_UNK8); put_u32le(header + 0x0c, PFSC_BLOCK_SIZE); put_u64le(header + 0x10, PFSC_BLOCK_SIZE); put_u64le(header + 0x18, PFSC_OFFSETS_OFFSET); put_u64le(header + 0x20, data_offset); put_u64le(header + 0x28, logical_size);
-  if (fseeko(out, (off_t)base_offset, SEEK_SET) != 0 ||
-      (rc = write_all(out, header, sizeof(header))) ||
-      (rc = write_zeros(out, data_offset - sizeof(header)))) { if (!rc) rc = EIO; goto failed; }
+  if(resume && resume->phase == MKPFS_RESUME_PACK && resume->pack_next_block) {
+    resumed_blocks = resume->pack_next_block;
+    if(resumed_blocks > block_count || resume->pack_stored_size < data_offset ||
+       fseeko(out, (off_t)(base_offset + PFSC_OFFSETS_OFFSET), SEEK_SET) != 0 ||
+       read_all(out, offsets, (size_t)(resumed_blocks + 1u) * sizeof(*offsets)) ||
+       offsets[0] != data_offset || offsets[resumed_blocks] != resume->pack_stored_size ||
+       fseeko(in, (off_t)(resumed_blocks * PFSC_BLOCK_SIZE), SEEK_SET) != 0 ||
+       ftruncate(fileno(out), (off_t)(base_offset + resume->pack_stored_size)) != 0) {
+      rc = EINVAL;
+      goto failed;
+    }
+    stored_pos = resume->pack_stored_size;
+    next_dispatch = resumed_blocks;
+    next_write = resumed_blocks;
+    checkpoint_from = resumed_blocks;
+    last_reported = resumed_blocks * PFSC_BLOCK_SIZE;
+    if(last_reported > (uint64_t)st.st_size) last_reported = (uint64_t)st.st_size;
+  } else {
+    if (fseeko(out, (off_t)base_offset, SEEK_SET) != 0 ||
+        (rc = write_all(out, header, sizeof(header))) ||
+        (rc = write_zeros(out, data_offset - sizeof(header)))) { if (!rc) rc = EIO; goto failed; }
+    stored_pos = data_offset;
+  }
+  if(fseeko(out, (off_t)(base_offset + stored_pos), SEEK_SET) != 0) {
+    rc = EIO;
+    goto failed;
+  }
   pool.count = requested_workers ? (requested_workers > 8 ? 8 : (int)requested_workers) : pfsc_auto_workers();
   if (pool.count < 1) pool.count = 1;
   pool.compression_level = compression_level; pool.cancel_requested = cancel_requested;
@@ -419,12 +462,10 @@ static int pack_pfsc_into_stream(const char *input_path, FILE *out, uint64_t bas
       threads_started++;
     }
   }
-  if (progress && progress(0, (uint64_t)st.st_size, "compress", input_path, opaque)) {
+  if (progress && progress(last_reported, (uint64_t)st.st_size, "compress", input_path, opaque)) {
     rc = ECANCELED;
     goto failed_pool;
   }
-  stored_pos = data_offset;
-  uint64_t next_dispatch = 0, next_write = 0;
   while (next_write < block_count) {
     while (next_dispatch < block_count && next_dispatch - next_write < (uint64_t)pool.count) {
       pfsc_slot_t *slot = &pool.slots[next_dispatch % (uint64_t)pool.count];
@@ -484,6 +525,42 @@ static int pack_pfsc_into_stream(const char *input_path, FILE *out, uint64_t bas
       pthread_mutex_lock(&pool.lock); slot->pending = 0; slot->done = 0; pthread_mutex_unlock(&pool.lock);
     }
     next_write++;
+    /* The checkpoint offset table needs both the first block offset and the
+     * end offset after the last durable block in its window. */
+    offsets[next_write] = stored_pos;
+    if(resume && checkpoint &&
+       (next_write == block_count || next_write - checkpoint_from >= 128u)) {
+      unsigned char checkpoint_offsets[(128u + 1u) * 8u];
+      size_t checkpoint_size = 0;
+
+      if((rc = write_buffer_flush(out, write_buffer, &write_buffer_used)) ||
+         fseeko(out, (off_t)(base_offset + PFSC_OFFSETS_OFFSET +
+                             checkpoint_from * 8u), SEEK_SET) != 0) {
+        if(!rc) rc = EIO;
+        goto failed_pool;
+      }
+      for(uint64_t i = checkpoint_from; i <= next_write; i++) {
+        put_u64le(checkpoint_offsets + checkpoint_size, offsets[i]);
+        checkpoint_size += 8u;
+      }
+      if(write_all(out, checkpoint_offsets, checkpoint_size) || fflush(out) != 0 ||
+         fsync(fileno(out)) != 0) {
+        rc = EIO;
+        goto failed_pool;
+      }
+      resume->phase = MKPFS_RESUME_PACK;
+      resume->pack_next_block = next_write;
+      resume->pack_stored_size = stored_pos;
+      if(checkpoint(resume, checkpoint_opaque)) {
+        rc = EIO;
+        goto failed_pool;
+      }
+      if(fseeko(out, (off_t)(base_offset + stored_pos), SEEK_SET) != 0) {
+        rc = EIO;
+        goto failed_pool;
+      }
+      checkpoint_from = next_write;
+    }
     {
       uint64_t completed = next_write * PFSC_BLOCK_SIZE > (uint64_t)st.st_size ?
                            (uint64_t)st.st_size : next_write * PFSC_BLOCK_SIZE;
@@ -520,7 +597,21 @@ static int pack_pfsc_into_stream(const char *input_path, FILE *out, uint64_t bas
     }
     if (offset_used && write_all(out, offset_buffer, offset_used)) { rc = EIO; goto failed_pool; }
   }
-  if (fflush(out) != 0 || fclose(in) != 0) { in = NULL; rc = EIO; goto failed_pool; }
+  if (fflush(out) != 0 || fsync(fileno(out)) != 0) {
+    rc = EIO;
+    goto failed_pool;
+  }
+  if(resume && checkpoint) {
+    resume->phase = MKPFS_RESUME_VERIFY;
+    resume->pack_next_block = block_count;
+    resume->pack_stored_size = stored_pos;
+    resume->verify_next_block = 0;
+    if(checkpoint(resume, checkpoint_opaque)) {
+      rc = EIO;
+      goto failed_pool;
+    }
+  }
+  if (fclose(in) != 0) { in = NULL; rc = EIO; goto failed_pool; }
   in = NULL;
   if (stored_size_out) *stored_size_out = stored_pos;
   rc = 0; goto done_pool;
@@ -552,8 +643,13 @@ int mkpfs_pack_pfsc_file_ex(const char *input_path, const char *output_path,
   if (!output_path) return EINVAL;
   rc = open_secure_temp_file(output_path, "pfsc", temp_path, sizeof(temp_path), &out);
   if (rc) return rc;
+  if(!out) {
+    unlink(temp_path);
+    return EIO;
+  }
   rc = pack_pfsc_into_stream(input_path, out, 0, compression_level, requested_workers,
-                             cancel_requested, progress, opaque, NULL);
+                             cancel_requested, progress, opaque, NULL, NULL, NULL,
+                             NULL);
   if (rc) { cleanup_pack(NULL, out, temp_path, rc); return rc; }
   if (fflush(out) != 0 || fsync(fileno(out)) != 0) { cleanup_pack(NULL, out, temp_path, EIO); return EIO; }
   if (fclose(out) != 0) { out = NULL; unlink(temp_path); return EIO; }
@@ -573,8 +669,12 @@ int mkpfs_pack_pfsc_file(const char *input_path, const char *output_path, int co
 static int verify_pfsc_stream(FILE *f, uint64_t base_offset,
                               uint64_t *logical_size_out, uint64_t *block_count_out,
                               const atomic_int *cancel_requested,
-                              mkpfs_progress_callback progress, void *opaque) {
+                              mkpfs_progress_callback progress, void *opaque,
+                              mkpfs_resume_state_t *resume,
+                              mkpfs_resume_checkpoint_callback checkpoint,
+                              void *checkpoint_opaque) {
   unsigned char header[PFSC_HEADER_SIZE]; uint64_t logical_size, block_count, offsets_offset, data_offset, previous = 0, verified = 0, last_reported = 0; int rc = 0;
+  uint64_t start_index = 0;
   if (!f) return EINVAL;
   if (fseeko(f, (off_t)base_offset, SEEK_SET) != 0 || read_all(f, header, sizeof(header))) return EINVAL;
   if (get_u32le(header) != PFSC_MAGIC || get_u32le(header + 4) != PFSC_UNK4 || get_u32le(header + 8) != PFSC_UNK8 || get_u32le(header + 12) != PFSC_BLOCK_SIZE || get_u64le(header + 16) != PFSC_BLOCK_SIZE) return EINVAL;
@@ -583,13 +683,31 @@ static int verify_pfsc_stream(FILE *f, uint64_t base_offset,
   block_count = logical_size / PFSC_BLOCK_SIZE;
   if (fseeko(f, 0, SEEK_END) != 0) return EIO;
   off_t file_size = ftello(f); if (file_size < 0 || base_offset > (uint64_t)file_size || (uint64_t)file_size - base_offset < data_offset) return EINVAL;
+  if(resume && resume->phase == MKPFS_RESUME_VERIFY) {
+    start_index = resume->verify_next_block;
+    if(start_index > block_count) return EINVAL;
+    verified = start_index * PFSC_BLOCK_SIZE;
+    if(verified > logical_size) verified = logical_size;
+    last_reported = verified;
+    if(start_index) {
+      unsigned char prior_offset[8];
+      if(fseeko(f, (off_t)(base_offset + offsets_offset + start_index * 8u),
+                SEEK_SET) != 0 || read_all(f, prior_offset, sizeof(prior_offset))) {
+        return EIO;
+      }
+      previous = get_u64le(prior_offset);
+      if(previous < data_offset || previous > (uint64_t)file_size - base_offset) {
+        return EINVAL;
+      }
+    }
+  }
   unsigned char *raw = (unsigned char *)malloc(PFSC_BLOCK_SIZE); unsigned char *stored = (unsigned char *)malloc(compressBound(PFSC_BLOCK_SIZE));
   if (!raw || !stored) { free(raw); free(stored); return ENOMEM; }
-  if (progress && progress(0, logical_size, "verify", "verifying PFSC", opaque)) {
+  if (progress && progress(verified, logical_size, "verify", "verifying PFSC", opaque)) {
     rc = ECANCELED;
     goto verify_done;
   }
-  for (uint64_t index = 0; index < block_count;) {
+  for (uint64_t index = start_index; index < block_count;) {
     unsigned char offset_window[(PFSC_VERIFY_OFFSET_WINDOW + 1u) * 8u];
     uint64_t count = block_count - index;
     uint64_t payload_position = 0;
@@ -603,7 +721,7 @@ static int verify_pfsc_stream(FILE *f, uint64_t base_offset,
       if (index + offset_index == 0 && start != data_offset) { rc = EINVAL; goto verify_done; }
       if (start < previous || end < start || end > (uint64_t)file_size - base_offset ||
           end - start > PFSC_BLOCK_SIZE) { rc = EINVAL; goto verify_done; }
-      previous = start;
+      previous = end;
     }
     payload_position = get_u64le(offset_window);
     if (fseeko(f, (off_t)(base_offset + payload_position), SEEK_SET) != 0) { rc = EIO; goto verify_done; }
@@ -625,6 +743,14 @@ static int verify_pfsc_stream(FILE *f, uint64_t base_offset,
       verified += PFSC_BLOCK_SIZE;
     }
     index += count;
+    if(resume && checkpoint) {
+      resume->phase = MKPFS_RESUME_VERIFY;
+      resume->verify_next_block = index;
+      if(checkpoint(resume, checkpoint_opaque)) {
+        rc = EIO;
+        goto verify_done;
+      }
+    }
     if (progress && (verified >= logical_size || verified - last_reported >= PFSC_PROGRESS_INTERVAL) &&
         progress(verified > logical_size ? logical_size : verified, logical_size,
                  "verify", "verifying PFSC", opaque)) {
@@ -632,6 +758,11 @@ static int verify_pfsc_stream(FILE *f, uint64_t base_offset,
       goto verify_done;
     }
     if (progress && verified - last_reported >= PFSC_PROGRESS_INTERVAL) last_reported = verified;
+  }
+  if(!rc && resume && checkpoint) {
+    resume->phase = MKPFS_RESUME_PUBLISH;
+    resume->verify_next_block = block_count;
+    if(checkpoint(resume, checkpoint_opaque)) rc = EIO;
   }
 verify_done: free(raw); free(stored);
   if (!rc) { if (logical_size_out) *logical_size_out = logical_size; if (block_count_out) *block_count_out = block_count; }
@@ -648,7 +779,8 @@ static int verify_pfsc_file_impl(const char *path, uint64_t *logical_size_out,
   f = fopen(path, "rb");
   if (!f) return errno;
   rc = verify_pfsc_stream(f, 0, logical_size_out, block_count_out,
-                          cancel_requested, progress, opaque);
+                          cancel_requested, progress, opaque, NULL, NULL,
+                          NULL);
   fclose(f);
   return rc;
 }
@@ -713,10 +845,13 @@ int mkpfs_wrap_exfat_file_ex(const char *exfat_path, const char *output_path,
   if (rc) return rc;
   if (!out) { unlink(temp_path); return EIO; }
   rc = pack_pfsc_into_stream(exfat_path, out, 6u * 65536u, compression_level, workers,
-                             cancel_requested, progress, opaque, &pfsc_size);
+                             cancel_requested, progress, opaque, &pfsc_size, NULL,
+                             NULL, NULL);
   if (rc != 0) goto wrap_failed;
   raw_size = 0;
-  rc = verify_pfsc_stream(out, 6u * 65536u, &raw_size, NULL, cancel_requested, progress, opaque);
+  rc = verify_pfsc_stream(out, 6u * 65536u, &raw_size, NULL,
+                          cancel_requested, progress, opaque, NULL, NULL,
+                          NULL);
   if (rc != 0) goto wrap_failed;
   if (cancellation_requested(cancel_requested)) { rc = ECANCELED; goto wrap_failed; }
   pfsc_blocks = (pfsc_size + 65535) / 65536;
@@ -751,6 +886,116 @@ wrap_failed_no_out: unlink(temp_path); free(inode_table); free(root_dir); return
 
 int mkpfs_wrap_exfat_file(const char *exfat_path, const char *output_path, const char *inner_name, int compression_level, const atomic_int *cancel_requested, mkpfs_progress_callback progress, void *opaque) {
   return mkpfs_wrap_exfat_file_ex(exfat_path, output_path, inner_name, compression_level, 1, cancel_requested, progress, opaque);
+}
+
+static int
+open_resume_stage(const char *path, FILE **out) {
+  struct stat st;
+  int fd;
+
+  if(!path || !out) return EINVAL;
+  if(lstat(path, &st) == 0) {
+    if(!S_ISREG(st.st_mode) || st.st_nlink != 1) return EINVAL;
+    fd = open(path, O_RDWR | O_NOFOLLOW);
+  } else {
+    if(errno != ENOENT) return errno;
+    fd = open(path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+  }
+  if(fd < 0) return errno;
+  *out = fdopen(fd, "rb+");
+  if(!*out) {
+    int error = errno;
+    close(fd);
+    return error;
+  }
+  return 0;
+}
+
+static int
+publish_resumable_pfs(FILE *out, const char *output_path, const char *inner_name,
+                      uint64_t pfsc_size, uint64_t raw_size,
+                      const atomic_int *cancel_requested,
+                      mkpfs_progress_callback progress, void *opaque) {
+  unsigned char *inode_table = NULL;
+  unsigned char *root_dir = NULL;
+  unsigned char header[65536] = {0};
+  unsigned char fpt[8];
+  unsigned char uroot[65536];
+  uint64_t pfsc_blocks;
+  uint64_t final_blocks;
+  uint32_t hash;
+  size_t pos = 0;
+  int rc = 0;
+
+  if(!out || !output_path || !inner_name) return EINVAL;
+  if(cancellation_requested(cancel_requested)) return ECANCELED;
+  pfsc_blocks = (pfsc_size + 65535u) / 65536u;
+  if(pfs_hash_path(inner_name, &hash) != 0) return EINVAL;
+  inode_table = calloc(4, 0xA8);
+  root_dir = calloc(1, 65536);
+  if(!inode_table || !root_dir) {
+    rc = ENOMEM;
+    goto done;
+  }
+  pos += pfs_dirent(root_dir + pos, 65536 - pos, 0, 4, ".");
+  pos += pfs_dirent(root_dir + pos, 65536 - pos, 0, 5, "..");
+  pos += pfs_dirent(root_dir + pos, 65536 - pos, 1, 2, "flat_path_table");
+  pos += pfs_dirent(root_dir + pos, 65536 - pos, 2, 3, "uroot");
+  if(!pos) { rc = EINVAL; goto done; }
+  put_u32le(fpt, hash);
+  put_u32le(fpt + 4, 3);
+  memset(uroot, 0, sizeof(uroot));
+  pos = 0;
+  pos += pfs_dirent(uroot + pos, sizeof(uroot) - pos, 2, 4, ".");
+  pos += pfs_dirent(uroot + pos, sizeof(uroot) - pos, 2, 5, "..");
+  pos += pfs_dirent(uroot + pos, sizeof(uroot) - pos, 3, 2, inner_name);
+  if(!pos) { rc = EINVAL; goto done; }
+  pfs_inode(inode_table + 0 * 0xA8, 0x4405, 1, 0x20010, 65536, 65536, 1, 2, 1);
+  pfs_inode(inode_table + 1 * 0xA8, 0x8101, 1, 0x20010, 8, 8, 1, 3, 1);
+  pfs_inode(inode_table + 2 * 0xA8, 0x4405, 3, 0x10, 65536, 65536, 1, 5, 1);
+  pfs_inode(inode_table + 3 * 0xA8, 0x8101, 1, 0x11, pfsc_size, raw_size,
+            pfsc_blocks, 6, 1);
+  put_i64le(header + 0x00, 2);
+  put_i64le(header + 0x08, 20130315);
+  header[0x1a] = 1;
+  put_u32le(header + 0x1c, 0x0008);
+  put_u32le(header + 0x20, 65536);
+  put_i64le(header + 0x28, 1);
+  put_i64le(header + 0x30, 4);
+  put_i64le(header + 0x40, 1);
+  put_u32le(header + 0x368, 1);
+  if(progress && progress(0, pfsc_size, "publish", "publishing output", opaque)) {
+    rc = ECANCELED;
+    goto done;
+  }
+  if(fseeko(out, 0, SEEK_SET) != 0 ||
+     write_all(out, header, sizeof(header)) ||
+     write_all(out, inode_table, 4 * 0xA8) ||
+     fseeko(out, 2 * 65536, SEEK_SET) != 0 ||
+     write_all(out, root_dir, 65536) ||
+     fseeko(out, 3 * 65536, SEEK_SET) != 0 ||
+     write_all(out, fpt, sizeof(fpt)) ||
+     fseeko(out, 5 * 65536, SEEK_SET) != 0 ||
+     write_all(out, uroot, sizeof(uroot))) {
+    rc = EIO;
+    goto done;
+  }
+  if(cancellation_requested(cancel_requested) ||
+     (progress && progress(pfsc_size, pfsc_size, "publish", "publishing output", opaque))) {
+    rc = ECANCELED;
+    goto done;
+  }
+  final_blocks = 6 + pfsc_blocks;
+  put_i64le(header + 0x38, (int64_t)final_blocks);
+  if(ftruncate(fileno(out), (off_t)(6u * 65536u + pfsc_size)) != 0 ||
+     fseeko(out, 0, SEEK_SET) != 0 || write_all(out, header, sizeof(header)) ||
+     fflush(out) != 0 || fsync(fileno(out)) != 0) {
+    rc = EIO;
+  }
+done:
+  free(inode_table);
+  free(root_dir);
+  return rc;
 }
 
 typedef struct exfat_node {
@@ -1071,4 +1316,204 @@ int mkpfs_convert_folder_progress(const char *source, const char *destination, c
 
 int mkpfs_convert_folder(const char *source, const char *destination, const char *output_name, const mkpfs_native_options_t *options, const atomic_int *cancel_requested) {
   return mkpfs_convert_folder_progress(source, destination, output_name, options, cancel_requested, NULL, NULL);
+}
+
+static int
+resume_path_in_destination(const char *path, const char *destination) {
+  size_t length;
+
+  if(!path || !destination || !*path || !*destination) return 0;
+  length = strlen(destination);
+  if(length == 1 && destination[0] == '/') return path[0] == '/';
+  return !strncmp(path, destination, length) && path[length] == '/';
+}
+
+static uint64_t
+resume_path_hash(const char *value) {
+  uint64_t hash = UINT64_C(1469598103934665603);
+
+  for(; *value; value++) {
+    hash ^= (unsigned char)*value;
+    hash *= UINT64_C(1099511628211);
+  }
+  hash ^= 0;
+  return hash * UINT64_C(1099511628211);
+}
+
+static int
+resume_stage_paths_match(const mkpfs_resume_state_t *resume,
+                         const char *destination, const char *output_name) {
+  char output[PATH_MAX];
+  char expected_exfat[PATH_MAX];
+  char expected_pfs[PATH_MAX];
+  uint64_t hash;
+
+  if(!resume || !destination || !output_name ||
+     snprintf(output, sizeof(output), "%s/%s", destination, output_name) >=
+       (int)sizeof(output)) return 0;
+  hash = resume_path_hash(output);
+  if(snprintf(expected_exfat, sizeof(expected_exfat),
+              "%s/.%s.mkpfs-%016llx.exfat.stage", destination, output_name,
+              (unsigned long long)hash) >= (int)sizeof(expected_exfat) ||
+     snprintf(expected_pfs, sizeof(expected_pfs),
+              "%s/.%s.mkpfs-%016llx.pfs.stage", destination, output_name,
+              (unsigned long long)hash) >= (int)sizeof(expected_pfs)) return 0;
+  return !strcmp(resume->exfat_path, expected_exfat) &&
+         !strcmp(resume->pfs_path, expected_pfs);
+}
+
+static int
+remove_private_stage(const char *path) {
+  struct stat st;
+
+  if(lstat(path, &st) != 0) return errno == ENOENT ? 0 : errno;
+  if(!S_ISREG(st.st_mode) || st.st_nlink != 1) return EINVAL;
+  return unlink(path) == 0 ? 0 : errno;
+}
+
+static int
+publish_stage_no_replace(const char *stage_path, const char *output_path) {
+  if(link(stage_path, output_path) != 0) return errno;
+  if(unlink(stage_path) != 0) {
+    int error = errno;
+    unlink(output_path);
+    return error;
+  }
+  return 0;
+}
+
+int
+mkpfs_convert_folder_resumable(
+  const char *source, const char *destination, const char *output_name,
+  const mkpfs_native_options_t *options, const atomic_int *cancel_requested,
+  mkpfs_progress_callback progress, void *progress_opaque,
+  mkpfs_resume_state_t *resume,
+  mkpfs_resume_checkpoint_callback checkpoint, void *checkpoint_opaque) {
+  struct stat st;
+  FILE *pfs = NULL;
+  char normalized[PATH_MAX];
+  char output[PATH_MAX];
+  char inner_name[NAME_MAX + 16];
+  char title_id[NAME_MAX];
+  uint64_t raw_size = 0;
+  uint64_t pfsc_size = 0;
+  int level;
+  int rc;
+
+  if(!source || !destination || !output_name || !*output_name || !resume ||
+     !checkpoint || strchr(output_name, '/') || strchr(output_name, '\\')) {
+    return EINVAL;
+  }
+  if(mkpfs_normalize_path(source, normalized, sizeof(normalized)) != 0 ||
+     stat(destination, &st) != 0 || !S_ISDIR(st.st_mode) ||
+     snprintf(output, sizeof(output), "%s/%s", destination, output_name) >=
+       (int)sizeof(output) ||
+     !resume_path_in_destination(resume->exfat_path, destination) ||
+     !resume_path_in_destination(resume->pfs_path, destination) ||
+     !resume_stage_paths_match(resume, destination, output_name) ||
+     !strcmp(resume->exfat_path, output) || !strcmp(resume->pfs_path, output) ||
+     resume->phase < MKPFS_RESUME_EXFAT ||
+     resume->phase > MKPFS_RESUME_PUBLISH) {
+    return EINVAL;
+  }
+  if(lstat(output, &st) == 0) return EEXIST;
+  if(errno != ENOENT) return errno;
+  level = options && options->compression_level <= 9 ?
+          (int)options->compression_level : 7;
+  if(resume->phase != MKPFS_RESUME_EXFAT && resume->inner_name[0]) {
+    if(!memchr(resume->inner_name, 0, sizeof(resume->inner_name)) ||
+       strlen(resume->inner_name) >= sizeof(inner_name)) return EINVAL;
+    snprintf(inner_name, sizeof(inner_name), "%s", resume->inner_name);
+  } else {
+    if(exfat_read_title_id(normalized, title_id, sizeof(title_id)) == 0) {
+      if(snprintf(inner_name, sizeof(inner_name), "%s.exfat", title_id) >=
+         (int)sizeof(inner_name)) return ENAMETOOLONG;
+    } else if(snprintf(inner_name, sizeof(inner_name), "%s.exfat", output_name) >=
+              (int)sizeof(inner_name)) {
+      return ENAMETOOLONG;
+    }
+    snprintf(resume->inner_name, sizeof(resume->inner_name), "%s", inner_name);
+  }
+
+  if(resume->phase == MKPFS_RESUME_EXFAT) {
+    if((rc = remove_private_stage(resume->exfat_path)) != 0) return rc;
+    if((rc = remove_private_stage(resume->pfs_path)) != 0) return rc;
+    if((rc = exfat_write_folder(normalized, resume->exfat_path,
+                                cancel_requested, progress, progress_opaque,
+                                &resume->exfat_size)) != 0) return rc;
+    resume->phase = MKPFS_RESUME_PACK;
+    resume->pack_next_block = 0;
+    resume->pack_stored_size = 0;
+    resume->verify_next_block = 0;
+    if(checkpoint(resume, checkpoint_opaque)) return EIO;
+  }
+
+  if(stat(resume->exfat_path, &st) != 0 || !S_ISREG(st.st_mode) ||
+     st.st_nlink != 1 || (resume->exfat_size &&
+                          (uint64_t)st.st_size != resume->exfat_size)) {
+    return ESTALE;
+  }
+  resume->exfat_size = (uint64_t)st.st_size;
+
+  if(resume->phase == MKPFS_RESUME_PACK ||
+     resume->phase == MKPFS_RESUME_VERIFY ||
+     resume->phase == MKPFS_RESUME_PUBLISH) {
+    if((rc = open_resume_stage(resume->pfs_path, &pfs)) != 0) return rc;
+    if(!pfs) return EIO;
+    if(resume->phase == MKPFS_RESUME_PACK) {
+      rc = pack_pfsc_into_stream(resume->exfat_path, pfs, 6u * 65536u, level,
+                                 options ? options->workers : 0,
+                                 cancel_requested, progress, progress_opaque,
+                                 &pfsc_size, resume, checkpoint,
+                                 checkpoint_opaque);
+      if(rc != 0) goto done;
+    }
+    if(resume->phase == MKPFS_RESUME_PUBLISH) {
+      /* Publication metadata may have been interrupted after the packed bytes
+       * were durable. Re-verify from block zero before writing it again. */
+      resume->phase = MKPFS_RESUME_VERIFY;
+      resume->verify_next_block = 0;
+      if(checkpoint(resume, checkpoint_opaque)) {
+        rc = EIO;
+        goto done;
+      }
+    }
+    if(resume->phase == MKPFS_RESUME_VERIFY) {
+      rc = verify_pfsc_stream(pfs, 6u * 65536u, &raw_size, NULL,
+                              cancel_requested, progress, progress_opaque,
+                              resume, checkpoint, checkpoint_opaque);
+      if(rc != 0) goto done;
+    }
+    if(resume->phase != MKPFS_RESUME_PUBLISH) {
+      rc = EINVAL;
+      goto done;
+    }
+    if(resume->pack_stored_size < PFSC_INITIAL_DATA_OFFSET ||
+       resume->pack_stored_size > UINT64_MAX - 6u * 65536u ||
+       ftruncate(fileno(pfs), (off_t)(6u * 65536u +
+                                      resume->pack_stored_size)) != 0 ||
+       fseeko(pfs, 0, SEEK_END) != 0 || ftello(pfs) < 0) {
+      rc = EIO;
+      goto done;
+    }
+    pfsc_size = (uint64_t)ftello(pfs) - 6u * 65536u;
+    rc = publish_resumable_pfs(pfs, output, inner_name, pfsc_size, raw_size,
+                               cancel_requested, progress, progress_opaque);
+    if(rc != 0) goto done;
+    if(fclose(pfs) != 0) {
+      pfs = NULL;
+      return EIO;
+    }
+    pfs = NULL;
+    if((rc = publish_stage_no_replace(resume->pfs_path, output)) != 0) return rc;
+    if((rc = remove_private_stage(resume->exfat_path)) != 0) return rc;
+    resume->phase = MKPFS_RESUME_DONE;
+    if(checkpoint(resume, checkpoint_opaque)) return EIO;
+    return 0;
+  }
+
+  return EINVAL;
+done:
+  if(pfs && fclose(pfs) != 0 && rc == 0) rc = EIO;
+  return rc;
 }
