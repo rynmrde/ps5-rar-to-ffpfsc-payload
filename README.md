@@ -19,7 +19,6 @@ If you would like to donate using another cryptocurrency that is not listed here
 
 > **Important:** The product name does **not** mean that a RAR file can be converted directly to `.ffpfsc` in one step. The supported workflow is: **extract the RAR or 7z archive to a folder, inspect the extracted files, and then convert that folder to `.ffpfsc`.**
 
-
 > **Safety notice:** This payload performs userland file operations only. It does not add kernel patches, raw-device access, or a guarantee against PS5 system errors, including CE-108262-9. Begin with non-critical files and a small test folder. Keep backups of important data.
 
 ## What it does
@@ -46,7 +45,6 @@ If you would like to donate using another cryptocurrency that is not listed here
    Replace `PS5-IP` with the console's local IP address.
 
 5. On the first run, browse files only. Confirm that the expected mounted locations are readable before starting a conversion, extraction, or download.
-6. Perform one small, non-critical test operation. Check the completed output before working with larger folders or archives.
 
 The default listening port is **6777**. A valid `WFM_PORT` environment value can explicitly select another port. If `WFM_PORT` is unset, empty, invalid, or `0`, the payload safely uses port 6777. The startup notification and managed launcher use the actual successfully bound port.
 
