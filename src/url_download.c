@@ -1,4 +1,5 @@
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -24,6 +25,23 @@
 #define URL_DOWNLOAD_HTTP_POOL_SIZE (512U * 1024U)
 #define URL_DOWNLOAD_TIMEOUT_US (20U * 1000U * 1000U)
 #define URL_DOWNLOAD_MIN_FREE_BYTES (32ULL * 1024ULL * 1024ULL)
+#define URL_DOWNLOAD_CHECKPOINT_BYTES (4ULL * 1024ULL * 1024ULL)
+#define URL_DOWNLOAD_QUEUE_LIMIT 8u
+#define URL_DOWNLOAD_JOURNAL_MAGIC 0x4d4b444cu
+#define URL_DOWNLOAD_JOURNAL_VERSION 1u
+#define URL_DOWNLOAD_JOURNAL_PREFIX "mkpfs-download-"
+#define URL_DOWNLOAD_JOURNAL_SUFFIX ".resume"
+
+typedef struct url_download_journal {
+  uint32_t magic;
+  uint32_t version;
+  uint64_t checksum;
+  uint64_t done;
+  uint64_t total;
+  char source[PATH_MAX];
+  char destination[PATH_MAX];
+  char temporary[PATH_MAX];
+} url_download_journal_t;
 
 typedef struct remote_url {
   int https;
@@ -33,6 +51,136 @@ typedef struct remote_url {
   char path[PATH_MAX];
 #endif
 } remote_url_t;
+
+static uint64_t
+download_hash_bytes(uint64_t hash, const void *data, size_t size) {
+  const unsigned char *bytes = data;
+
+  for(size_t i = 0; i < size; i++) {
+    hash ^= bytes[i];
+    hash *= UINT64_C(1099511628211);
+  }
+  return hash;
+}
+
+static uint64_t
+download_journal_checksum(const url_download_journal_t *journal) {
+  return download_hash_bytes(UINT64_C(1469598103934665603), journal,
+                             offsetof(url_download_journal_t, checksum));
+}
+
+static const char *
+download_journal_directory(void) {
+  const char *configured = getenv("WFM_DOWNLOAD_DIR");
+
+  if(configured && configured[0] == '/') return configured;
+#ifdef __linux__
+  return "/tmp/mkpfs-downloads";
+#else
+  return "/data/mkpfs-downloads";
+#endif
+}
+
+static int
+ensure_download_journal_directory(void) {
+  struct stat st;
+  const char *directory = download_journal_directory();
+
+  if(mkdir(directory, 0700) && errno != EEXIST) return -1;
+  if(lstat(directory, &st) || !S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode)) {
+    errno = EINVAL;
+    return -1;
+  }
+  return 0;
+}
+
+static int
+download_path_hash(const char *destination, uint64_t *hash) {
+  if(!destination || !hash) {
+    errno = EINVAL;
+    return -1;
+  }
+  *hash = download_hash_bytes(UINT64_C(1469598103934665603), destination,
+                              strlen(destination) + 1);
+  return 0;
+}
+
+static int
+download_journal_path(const char *destination, char *path, size_t path_size) {
+  uint64_t hash;
+
+  if(download_path_hash(destination, &hash) || ensure_download_journal_directory() ||
+     snprintf(path, path_size, "%s/" URL_DOWNLOAD_JOURNAL_PREFIX "%016llx" \
+              URL_DOWNLOAD_JOURNAL_SUFFIX, download_journal_directory(),
+              (unsigned long long)hash) >= (int)path_size) {
+    if(!errno) errno = ENAMETOOLONG;
+    return -1;
+  }
+  return 0;
+}
+
+static int
+download_temporary_path(const char *destination, char *path, size_t path_size) {
+  char parent[PATH_MAX];
+  uint64_t hash;
+
+  if(path_dirname(destination, parent, sizeof(parent)) ||
+     download_path_hash(destination, &hash) ||
+     snprintf(path, path_size, "%s/.mkpfs-download-%016llx.part", parent,
+              (unsigned long long)hash) >= (int)path_size) {
+    if(!errno) errno = ENAMETOOLONG;
+    return -1;
+  }
+  return 0;
+}
+
+static int
+write_download_journal(const file_task_t *task) {
+  url_download_journal_t journal = {0};
+  char temporary[PATH_MAX];
+  FILE *f;
+  int fd;
+
+  if(!task || !task->download_journal[0] || !task->download_temporary[0]) {
+    errno = EINVAL;
+    return -1;
+  }
+  if(snprintf(temporary, sizeof(temporary), "%s.tmp.XXXXXX",
+              task->download_journal) >= (int)sizeof(temporary)) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+  journal.magic = URL_DOWNLOAD_JOURNAL_MAGIC;
+  journal.version = URL_DOWNLOAD_JOURNAL_VERSION;
+  pthread_mutex_lock(&g_tasks_lock);
+  journal.done = task->done;
+  journal.total = task->total;
+  snprintf(journal.source, sizeof(journal.source), "%s", task->src);
+  snprintf(journal.destination, sizeof(journal.destination), "%s", task->dst);
+  snprintf(journal.temporary, sizeof(journal.temporary), "%s", task->download_temporary);
+  pthread_mutex_unlock(&g_tasks_lock);
+  journal.checksum = download_journal_checksum(&journal);
+  fd = mkstemp(temporary);
+  if(fd < 0 || !(f = fdopen(fd, "wb"))) {
+    if(fd >= 0) close(fd);
+    return -1;
+  }
+  if(fwrite(&journal, sizeof(journal), 1, f) != 1 || fflush(f) ||
+     fsync(fileno(f)) || fclose(f) || rename(temporary, task->download_journal)) {
+    int error = errno ? errno : EIO;
+    unlink(temporary);
+    errno = error;
+    return -1;
+  }
+  return 0;
+}
+
+void
+url_download_discard_state(file_task_t *task) {
+  if(!task) return;
+  if(task->download_temporary[0]) unlink(task->download_temporary);
+  if(task->download_journal[0]) unlink(task->download_journal);
+}
 
 #ifdef __SCE__
 /* PS5 SceHttp interfaces.  The public payload SDK supplies the corresponding
@@ -49,6 +197,8 @@ extern int sceHttpCreateRequestWithURL(int connection_id, int method,
                                        const char *url,
                                        unsigned long long content_length);
 extern int sceHttpDeleteRequest(int request_id);
+extern int sceHttpAddRequestHeader(int request_id, const char *name,
+                                   const char *value, int mode);
 extern int sceHttpSetAutoRedirect(int id, int enabled);
 extern int sceHttpSetResolveTimeOut(int id, unsigned int microseconds);
 extern int sceHttpSetResolveRetry(int id, int retry_count);
@@ -67,6 +217,7 @@ extern int sceHttpsEnableOption(unsigned int ssl_flags);
 #define SCE_HTTP_METHOD_GET 0
 #define SCE_HTTP_VERSION_1_1 2
 #define SCE_HTTP_ENABLE 1
+#define SCE_HTTP_HEADER_OVERWRITE 0
 #define SCE_HTTPS_FLAG_SERVER_VERIFY 0x01U
 #define SCE_HTTPS_FLAG_CN_CHECK 0x04U
 #define SCE_HTTPS_FLAG_NOT_AFTER_CHECK 0x08U
@@ -246,9 +397,11 @@ static void host_http_close(host_http_client_t *client);
 
 static int
 host_http_open(const char *text, const remote_url_t *url,
-               host_http_client_t *client, unsigned long long *content_length,
+               unsigned long long resume_at, host_http_client_t *client,
+               unsigned long long *content_length,
                char *error, size_t error_size) {
   char request[PATH_MAX + 384];
+  char range_header[64] = {0};
   size_t used = 0;
   int status = 0;
   int saw_length = 0;
@@ -260,14 +413,21 @@ host_http_open(const char *text, const remote_url_t *url,
     return -1;
   }
   memset(client, 0, sizeof(*client));
+  if(resume_at && snprintf(range_header, sizeof(range_header),
+                           "Range: bytes=%llu-\r\n", resume_at) >=
+                  (int)sizeof(range_header)) {
+    errno = EOVERFLOW;
+    return -1;
+  }
   client->fd = host_connect(url);
   if(client->fd < 0) {
     snprintf(error, error_size, "could not connect to download host");
     return -1;
   }
   if(snprintf(request, sizeof(request),
-              "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: MkPFS-PS5/0.3\r\n"
-              "Accept: */*\r\nConnection: close\r\n\r\n", url->path, url->host) >=
+              "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: MkPFS-PS5/0.4\r\n"
+              "Accept: */*\r\n%sConnection: close\r\n\r\n", url->path, url->host,
+              range_header) >=
      (int)sizeof(request) || host_send_all(client->fd, request, strlen(request))) {
     snprintf(error, error_size, "could not send download request");
     host_http_close(client);
@@ -291,7 +451,8 @@ host_http_open(const char *text, const remote_url_t *url,
       char *line;
       size_t header_bytes = (size_t)(headers_end + 4 - client->pending);
       if(sscanf(client->pending, "HTTP/%*u.%*u %d", &status) != 1 ||
-         status < 200 || status >= 300) {
+         status < 200 || status >= 300 || (resume_at && status != 206) ||
+         (!resume_at && status != 200)) {
         snprintf(error, error_size, "HTTP status %d", status);
         errno = EIO;
         host_http_close(client);
@@ -333,7 +494,7 @@ host_http_open(const char *text, const remote_url_t *url,
       client->pending_offset = header_bytes;
       client->pending_size = used;
       client->body_remaining = saw_length ? client->content_length : ULLONG_MAX;
-      *content_length = saw_length ? client->content_length : 0;
+      *content_length = saw_length ? client->content_length + resume_at : 0;
       return 0;
     }
   }
@@ -432,21 +593,48 @@ url_download_task_run(file_task_t *task) {
   remote_url_t url = {0};
   unsigned char buffer[URL_DOWNLOAD_BUFFER_SIZE];
   unsigned long long content_length = 0;
+  unsigned long long resume_at = 0;
+  struct stat temporary_st;
   int fd = -1;
   int created = 0;
   int result = EIO;
 
   if(!task || parse_remote_url(task->src, &url) ||
      path_dirname(task->dst, parent, sizeof(parent)) ||
-     snprintf(temporary, sizeof(temporary), "%s/.mkpfs-download-%lu-XXXXXX",
-              parent, task->id) >= (int)sizeof(temporary)) {
+     (!task->download_temporary[0] &&
+      download_temporary_path(task->dst, task->download_temporary,
+                              sizeof(task->download_temporary))) ||
+     (!task->download_journal[0] &&
+      download_journal_path(task->dst, task->download_journal,
+                            sizeof(task->download_journal))) ||
+     snprintf(temporary, sizeof(temporary), "%s", task->download_temporary) >=
+       (int)sizeof(temporary)) {
     return errno ? errno : EINVAL;
   }
-  fd = mkstemp(temporary);
+  if(lstat(temporary, &temporary_st) == 0) {
+    if(!S_ISREG(temporary_st.st_mode) || temporary_st.st_nlink != 1 ||
+       temporary_st.st_size < 0) {
+      errno = EINVAL;
+      return EINVAL;
+    }
+    resume_at = (unsigned long long)temporary_st.st_size;
+    fd = open(temporary, O_WRONLY | O_APPEND | O_NOFOLLOW);
+  } else if(errno == ENOENT) {
+    fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    created = 1;
+  }
   if(fd < 0) return errno;
-  created = 1;
   if(fchmod_0777(fd)) {
     result = errno;
+    goto done;
+  }
+  if(resume_at) {
+    pthread_mutex_lock(&g_tasks_lock);
+    if(task->done != resume_at) task->done = resume_at;
+    pthread_mutex_unlock(&g_tasks_lock);
+  }
+  if(write_download_journal(task)) {
+    result = errno ? errno : EIO;
     goto done;
   }
   task_update(task, TASK_RUNNING, task->src, 0, NULL);
@@ -459,6 +647,7 @@ url_download_task_run(file_task_t *task) {
     int status_code = 0;
     int http_initialized = 0;
     int code;
+    char range_value[48];
 
     code = sceHttpInit(URL_DOWNLOAD_HTTP_POOL_SIZE);
     if(code < 0) {
@@ -474,7 +663,7 @@ url_download_task_run(file_task_t *task) {
       snprintf(error, sizeof(error), "PS5 HTTPS certificate verification setup failed");
       goto sce_done;
     }
-    template_id = sceHttpCreateTemplate("MkPFS-PS5/0.3", SCE_HTTP_VERSION_1_1, 1);
+    template_id = sceHttpCreateTemplate("MkPFS-PS5/0.4", SCE_HTTP_VERSION_1_1, 1);
     if(template_id < 0 || sceHttpSetAutoRedirect(template_id, 0) < 0 ||
        sceHttpSetResolveTimeOut(template_id, URL_DOWNLOAD_TIMEOUT_US) < 0 ||
        sceHttpSetResolveRetry(template_id, 1) < 0 ||
@@ -488,22 +677,32 @@ url_download_task_run(file_task_t *task) {
     connection_id = sceHttpCreateConnectionWithURL(template_id, task->src, 0);
     request_id = connection_id < 0 ? -1 :
       sceHttpCreateRequestWithURL(connection_id, SCE_HTTP_METHOD_GET, task->src, 0);
-    if(connection_id < 0 || request_id < 0 || sceHttpSendRequest(request_id, NULL, 0) < 0 ||
+    if(resume_at && snprintf(range_value, sizeof(range_value), "bytes=%llu-",
+                             resume_at) >= (int)sizeof(range_value)) {
+      snprintf(error, sizeof(error), "download range is invalid");
+      goto sce_done;
+    }
+    if(connection_id < 0 || request_id < 0 ||
+       (resume_at && sceHttpAddRequestHeader(request_id, "Range", range_value,
+                                              SCE_HTTP_HEADER_OVERWRITE) < 0) ||
+       sceHttpSendRequest(request_id, NULL, 0) < 0 ||
        sceHttpGetStatusCode(request_id, &status_code) < 0) {
       snprintf(error, sizeof(error), "PS5 HTTP request failed");
       goto sce_done;
     }
-    if(status_code < 200 || status_code >= 300) {
+    if(status_code < 200 || status_code >= 300 ||
+       (resume_at && status_code != 206) || (!resume_at && status_code != 200)) {
       snprintf(error, sizeof(error), "HTTP status %d", status_code);
       goto sce_done;
     }
     if(sceHttpGetResponseContentLength(request_id, &content_length) == 0 &&
        content_length != ULLONG_MAX) {
-      url_task_total(task, content_length);
+      url_task_total(task, content_length + resume_at);
     } else {
       content_length = 0;
     }
-    while(!task_cancel_requested(task)) {
+    while(!task_cancel_requested(task) &&
+          !atomic_load_explicit(&task->pause_requested, memory_order_acquire)) {
       int got = sceHttpReadData(request_id, buffer, sizeof(buffer));
       if(got < 0) {
         if(task_cancel_requested(task)) {
@@ -529,8 +728,16 @@ url_download_task_run(file_task_t *task) {
         }
       }
       task_update(task, TASK_RUNNING, task->src, (unsigned long long)got, NULL);
+      if(task->done - task->download_checkpoint_done >= URL_DOWNLOAD_CHECKPOINT_BYTES) {
+        if(write_download_journal(task)) {
+          result = errno ? errno : EIO;
+          goto sce_done;
+        }
+        task->download_checkpoint_done = task->done;
+      }
     }
     if(task_cancel_requested(task)) result = ECANCELED;
+    else if(atomic_load_explicit(&task->pause_requested, memory_order_acquire)) result = EINPROGRESS;
 
 sce_done:
     if(request_id >= 0) sceHttpDeleteRequest(request_id);
@@ -544,13 +751,14 @@ sce_done:
     ssize_t got = 0;
     memset(&client, 0, sizeof(client));
     client.fd = -1;
-    if(host_http_open(task->src, &url, &client, &content_length,
+    if(host_http_open(task->src, &url, resume_at, &client, &content_length,
                       error, sizeof(error))) {
       result = errno ? errno : EIO;
       goto done;
     }
     if(content_length) url_task_total(task, content_length);
     while(!task_cancel_requested(task) &&
+          !atomic_load_explicit(&task->pause_requested, memory_order_acquire) &&
           (got = host_http_read(&client, buffer, sizeof(buffer))) > 0) {
       size_t offset = 0;
       while(offset < (size_t)got) {
@@ -563,9 +771,19 @@ sce_done:
         offset += (size_t)wrote;
       }
       task_update(task, TASK_RUNNING, task->src, (unsigned long long)got, NULL);
+      if(task->done - task->download_checkpoint_done >= URL_DOWNLOAD_CHECKPOINT_BYTES) {
+        if(write_download_journal(task)) {
+          result = errno ? errno : EIO;
+          host_http_close(&client);
+          goto done;
+        }
+        task->download_checkpoint_done = task->done;
+      }
     }
     if(task_cancel_requested(task)) {
       result = ECANCELED;
+    } else if(atomic_load_explicit(&task->pause_requested, memory_order_acquire)) {
+      result = EINPROGRESS;
     } else if(got < 0) {
       snprintf(error, sizeof(error), "HTTP response read failed");
       result = errno ? errno : EIO;
@@ -596,11 +814,140 @@ sce_done:
 
 done:
   if(fd >= 0) close(fd);
-  if(result != 0 && created) unlink(temporary);
+  if(result == 0) {
+    url_download_discard_state(task);
+  } else if(result == ECANCELED) {
+    url_download_discard_state(task);
+  } else if(result == EINPROGRESS) {
+    if(write_download_journal(task)) result = errno ? errno : EIO;
+  } else if(created || task->download_temporary[0]) {
+    /* Keep a validated same-directory part file plus its atomic journal. A
+     * retry or a payload restart asks the remote endpoint for the exact range
+     * already durable on disk; it never publishes a partial final name. */
+    (void)write_download_journal(task);
+  }
   if(result != 0 && error[0]) {
     task_update(task, TASK_RUNNING, task->src, 0, error);
   }
   return result;
+}
+
+static int
+read_download_journal(const char *path, url_download_journal_t *journal) {
+  FILE *f;
+  struct stat st;
+
+  if(!path || !journal || lstat(path, &st) || !S_ISREG(st.st_mode) ||
+     st.st_nlink != 1 || (size_t)st.st_size != sizeof(*journal) ||
+     !(f = fopen(path, "rb"))) return -1;
+  if(fread(journal, sizeof(*journal), 1, f) != 1 || fclose(f) ||
+     journal->magic != URL_DOWNLOAD_JOURNAL_MAGIC ||
+     journal->version != URL_DOWNLOAD_JOURNAL_VERSION ||
+     journal->checksum != download_journal_checksum(journal) ||
+     !memchr(journal->source, 0, sizeof(journal->source)) ||
+     !memchr(journal->destination, 0, sizeof(journal->destination)) ||
+     !memchr(journal->temporary, 0, sizeof(journal->temporary))) {
+    return -1;
+  }
+  return 0;
+}
+
+static int
+restore_download_part(const url_download_journal_t *journal) {
+  struct stat st;
+  int fd;
+
+  if(lstat(journal->temporary, &st) || !S_ISREG(st.st_mode) ||
+     st.st_nlink != 1 || st.st_size < 0 || (uint64_t)st.st_size < journal->done) {
+    errno = EINVAL;
+    return -1;
+  }
+  /* A crash can occur after writing a block but before the next atomic
+   * checkpoint. Discard only that unjournaled suffix, so the next Range
+   * request begins at an explicitly durable offset rather than trusting it. */
+  if((uint64_t)st.st_size > journal->done) {
+    fd = open(journal->temporary, O_WRONLY | O_NOFOLLOW);
+    if(fd < 0) return -1;
+    if(ftruncate(fd, (off_t)journal->done) || fsync(fd)) {
+      int error = errno;
+      close(fd);
+      errno = error;
+      return -1;
+    }
+    close(fd);
+  }
+  return 0;
+}
+
+int
+url_download_resume_interrupted(void) {
+  DIR *directory;
+  struct dirent *entry;
+  unsigned int restored = 0;
+
+  if(ensure_download_journal_directory()) return -1;
+  if(has_active_task()) return 0;
+  directory = opendir(download_journal_directory());
+  if(!directory) return -1;
+  while(restored < URL_DOWNLOAD_QUEUE_LIMIT && (entry = readdir(directory)) != NULL) {
+    char path[PATH_MAX];
+    char expected_journal[PATH_MAX];
+    char expected_temporary[PATH_MAX];
+    url_download_journal_t journal;
+    remote_url_t parsed = {0};
+    struct stat destination_st;
+    file_task_t *task;
+    pthread_t thread;
+
+    if(strncmp(entry->d_name, URL_DOWNLOAD_JOURNAL_PREFIX,
+               strlen(URL_DOWNLOAD_JOURNAL_PREFIX)) ||
+       strlen(entry->d_name) <= strlen(URL_DOWNLOAD_JOURNAL_PREFIX) +
+                              strlen(URL_DOWNLOAD_JOURNAL_SUFFIX) ||
+       strcmp(entry->d_name + strlen(entry->d_name) -
+              strlen(URL_DOWNLOAD_JOURNAL_SUFFIX), URL_DOWNLOAD_JOURNAL_SUFFIX) ||
+       snprintf(path, sizeof(path), "%s/%s", download_journal_directory(),
+                entry->d_name) >= (int)sizeof(path) ||
+       read_download_journal(path, &journal) || parse_remote_url(journal.source, &parsed) ||
+       path_dirname(journal.destination, expected_journal, sizeof(expected_journal)) ||
+       lstat(expected_journal, &destination_st) || !S_ISDIR(destination_st.st_mode) ||
+       lstat(journal.destination, &destination_st) == 0 || errno != ENOENT ||
+       download_journal_path(journal.destination, expected_journal,
+                             sizeof(expected_journal)) ||
+       download_temporary_path(journal.destination, expected_temporary,
+                               sizeof(expected_temporary)) ||
+       strcmp(path, expected_journal) || strcmp(journal.temporary, expected_temporary) ||
+       restore_download_part(&journal)) {
+      continue;
+    }
+    task = calloc(1, sizeof(*task));
+    if(!task) break;
+    atomic_init(&task->cancel_requested, 0);
+    atomic_init(&task->pause_requested, 0);
+    task->op = TASK_URL_DOWNLOAD;
+    task->state = TASK_QUEUED;
+    task->done = journal.done;
+    task->total = journal.total;
+    task->download_checkpoint_done = journal.done;
+    snprintf(task->src, sizeof(task->src), "%s", journal.source);
+    snprintf(task->dst, sizeof(task->dst), "%s", journal.destination);
+    snprintf(task->current, sizeof(task->current), "%s", journal.source);
+    snprintf(task->download_journal, sizeof(task->download_journal), "%s", path);
+    snprintf(task->download_temporary, sizeof(task->download_temporary), "%s", journal.temporary);
+    task->created_at = task->updated_at = time(NULL);
+    pthread_mutex_lock(&g_tasks_lock);
+    task->id = g_next_task_id++;
+    task->next = g_tasks;
+    g_tasks = task;
+    pthread_mutex_unlock(&g_tasks_lock);
+    if(pthread_create(&thread, NULL, task_worker, task)) {
+      task_update(task, TASK_FAILED, task->src, 0, "download recovery worker creation failed");
+    } else {
+      pthread_detach(thread);
+      restored++;
+    }
+  }
+  closedir(directory);
+  return (int)restored;
 }
 
 enum MHD_Result
@@ -609,6 +956,7 @@ api_url_download(struct MHD_Connection *conn) {
   char *destination = absolute_path_value(query_value(conn, "destination"));
   char *name = fs_path_value(query_value(conn, "name"));
   char output[PATH_MAX];
+  char journal_path[PATH_MAX];
   struct stat destination_st;
   struct stat output_st;
   file_task_t *task = NULL;
@@ -627,6 +975,11 @@ api_url_download(struct MHD_Connection *conn) {
     status = MHD_HTTP_CONFLICT;
     goto out;
   }
+  if(download_journal_path(output, journal_path, sizeof(journal_path)) ||
+     lstat(journal_path, &output_st) == 0 || errno != ENOENT) {
+    status = MHD_HTTP_CONFLICT;
+    goto out;
+  }
   if(target_available_space(destination, &available) ||
      available < URL_DOWNLOAD_MIN_FREE_BYTES) {
     status = MHD_HTTP_INSUFFICIENT_STORAGE;
@@ -638,6 +991,7 @@ api_url_download(struct MHD_Connection *conn) {
     goto out;
   }
   atomic_init(&task->cancel_requested, 0);
+  atomic_init(&task->pause_requested, 0);
   task->op = TASK_URL_DOWNLOAD;
   task->state = TASK_QUEUED;
   snprintf(task->src, sizeof(task->src), "%s", url);
@@ -647,10 +1001,24 @@ api_url_download(struct MHD_Connection *conn) {
 
   pthread_mutex_lock(&g_tasks_lock);
   remove_finished_tasks_locked();
-  if(has_active_task_locked()) {
+  {
+    file_task_t *existing;
+    unsigned int url_tasks = 0;
+    int blocking_task = 0;
+    for(existing = g_tasks; existing; existing = existing->next) {
+      if(existing->op == TASK_URL_DOWNLOAD &&
+         (task_is_active(existing) || existing->state == TASK_PAUSED ||
+          existing->state == TASK_FAILED)) {
+        url_tasks++;
+      } else if(existing->op != TASK_URL_DOWNLOAD && task_is_active(existing)) {
+        blocking_task = 1;
+      }
+    }
+    if(blocking_task || url_tasks >= URL_DOWNLOAD_QUEUE_LIMIT) {
     pthread_mutex_unlock(&g_tasks_lock);
     status = MHD_HTTP_CONFLICT;
     goto out;
+    }
   }
   task->id = g_next_task_id++;
   task->next = g_tasks;

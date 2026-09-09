@@ -151,6 +151,13 @@ typedef struct copy_queue {
 #endif
 
 static task_completion_t g_last_completion;
+/* Downloads use independent bounded I/O, so allow a small queue of workers
+ * without allowing conversion/extraction operations to contend for storage. */
+#define URL_DOWNLOAD_WORKER_LIMIT 2u
+#define URL_DOWNLOAD_QUEUE_LIMIT 8u
+static pthread_mutex_t g_url_download_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_url_download_slot = PTHREAD_COND_INITIALIZER;
+static unsigned int g_url_download_workers;
 #ifndef __linux__
 static pthread_cond_t g_pkg_tasks_cond = PTHREAD_COND_INITIALIZER;
 static pthread_t g_pkg_worker_thread;
@@ -2232,7 +2239,20 @@ task_worker(void *arg) {
   unsigned long long total = 0;
   unsigned long long required = 0;
   int ret = -1;
+  int download_slot = 0;
 
+  if(task->op == TASK_URL_DOWNLOAD) {
+    pthread_mutex_lock(&g_url_download_lock);
+    while(g_url_download_workers >= URL_DOWNLOAD_WORKER_LIMIT &&
+          !atomic_load_explicit(&task->cancel_requested, memory_order_acquire)) {
+      pthread_cond_wait(&g_url_download_slot, &g_url_download_lock);
+    }
+    if(!atomic_load_explicit(&task->cancel_requested, memory_order_acquire)) {
+      g_url_download_workers++;
+      download_slot = 1;
+    }
+    pthread_mutex_unlock(&g_url_download_lock);
+  }
   task_update(task, TASK_RUNNING, "preparing", 0, NULL);
 
   if(task_cancel_requested(task)) {
@@ -2367,7 +2387,10 @@ task_worker(void *arg) {
         }
       }
       if(ret != 0 && archive_error[0]) {
-        task_set_error_code(task, "archive_extract_failed", task->srcs[0]);
+        task_set_error_code(task,
+                            strcasestr(archive_error, "password") ?
+                            "archive_password" : "archive_extract_failed",
+                            task->srcs[0]);
         task_update(task, TASK_RUNNING, task->srcs[0], 0, archive_error);
       }
     }
@@ -2382,6 +2405,17 @@ task_worker(void *arg) {
   }
   if(task->op == TASK_URL_DOWNLOAD) {
     ret = url_download_task_run(task);
+    if(download_slot) {
+      pthread_mutex_lock(&g_url_download_lock);
+      g_url_download_workers--;
+      pthread_cond_broadcast(&g_url_download_slot);
+      pthread_mutex_unlock(&g_url_download_lock);
+      download_slot = 0;
+    }
+    if(ret == EINPROGRESS) {
+      task_update(task, TASK_PAUSED, task->src, 0, "paused; safe resume is available");
+      return NULL;
+    }
   }
   if(task->op == TASK_COPY || task->op == TASK_MOVE) {
     char error[160] = {0};
@@ -2693,6 +2727,11 @@ filemgr_resume_interrupted_conversions(void) {
   return 1;
 }
 
+int
+filemgr_resume_interrupted_downloads(void) {
+  return url_download_resume_interrupted();
+}
+
 static enum MHD_Result
 create_task_response(struct MHD_Connection *conn, task_op_t op,
                      char **srcs, size_t src_count, const char *dst,
@@ -2799,10 +2838,8 @@ api_convert(struct MHD_Connection *conn) {
   char *profile = query_value(conn, "profile");
   char *workers_param = query_value(conn, "workers");
   struct stat source_st, destination_st;
-  mkpfs_scan_result_t scan;
   unsigned long level = profile ? strtoul(profile, NULL, 10) : 7;
   unsigned long workers = 0;
-  unsigned long long available = 0;
   if (workers_param && strcasecmp(workers_param, "auto")) workers = strtoul(workers_param, NULL, 10);
   file_task_t *task = NULL;
   strbuf_t b = {0};
@@ -2813,14 +2850,14 @@ api_convert(struct MHD_Connection *conn) {
   if (!source || !destination || !name || !relative_path_safe(name) || level > 9 || workers > 8 || (workers_param && strcasecmp(workers_param, "auto") && workers == 0) || stat(source, &source_st) || !S_ISDIR(source_st.st_mode) || stat(destination, &destination_st) || !S_ISDIR(destination_st.st_mode)) {
     rc = MHD_HTTP_BAD_REQUEST; goto convert_error;
   }
-  if (mkpfs_scan_folder(source, &scan)) { rc = MHD_HTTP_BAD_REQUEST; goto convert_error; }
-  uint64_t required_workspace = 0;
-  if (mkpfs_estimate_conversion_workspace(&scan, &required_workspace) ||
-      target_available_space(destination, &available) ||
-      available < required_workspace) {
-    rc = MHD_HTTP_INSUFFICIENT_STORAGE; goto convert_error;
-  }
   if (snprintf(output, sizeof(output), "%s/%s", destination, name) >= (int)sizeof(output)) { rc = MHD_HTTP_BAD_REQUEST; goto convert_error; }
+  {
+    struct stat output_st;
+    if(lstat(output, &output_st) == 0 || errno != ENOENT) {
+      rc = MHD_HTTP_CONFLICT;
+      goto convert_error;
+    }
+  }
   srcs = calloc(1, sizeof(*srcs)); task = calloc(1, sizeof(*task));
   if (!srcs || !task) { rc = MHD_HTTP_INTERNAL_SERVER_ERROR; goto convert_error; }
   atomic_init(&task->cancel_requested, 0);
@@ -2838,8 +2875,8 @@ api_convert(struct MHD_Connection *conn) {
 convert_error:
   free(source); free(destination); free(name); free(profile); free(workers_param); free(srcs); if (task) { free(task->srcs); free(task); }
   return send_json_error(conn, rc,
-                         rc == MHD_HTTP_INSUFFICIENT_STORAGE ?
-                         "insufficient safe working space for temporary image and final output" :
+                         rc == MHD_HTTP_CONFLICT ?
+                         "destination exists or another task is running" :
                          "invalid conversion request");
 }
 
@@ -2992,12 +3029,19 @@ api_cancel(struct MHD_Connection *conn) {
   unsigned long id = idstr ? strtoul(idstr, NULL, 10) : 0;
   file_task_t *task;
   int found = 0;
+  int discard_paused = 0;
 
   free(idstr);
   pthread_mutex_lock(&g_tasks_lock);
   for(task = g_tasks; task; task = task->next) {
-    if(task->id == id && task->op != TASK_PKG_INSTALL && task_is_active(task)) {
+    if(task->id == id && task->op != TASK_PKG_INSTALL &&
+       (task_is_active(task) || task->state == TASK_PAUSED)) {
       atomic_store_explicit(&task->cancel_requested, 1, memory_order_release);
+      if(task->op == TASK_URL_DOWNLOAD && task->state == TASK_PAUSED) {
+        task->state = TASK_CANCELED;
+        snprintf(task->error, sizeof(task->error), "canceled");
+        discard_paused = 1;
+      }
       if(task->op == TASK_DOWNLOAD && task->state == TASK_QUEUED) {
         task->state = TASK_CANCELED;
         snprintf(task->error, sizeof(task->error), "canceled");
@@ -3008,9 +3052,65 @@ api_cancel(struct MHD_Connection *conn) {
     }
   }
   pthread_mutex_unlock(&g_tasks_lock);
+  if(discard_paused) url_download_discard_state(task);
 
   return found ? send_json_ok(conn) :
                  send_json_error(conn, MHD_HTTP_NOT_FOUND, "active task not found");
+}
+
+static enum MHD_Result
+api_download_pause(struct MHD_Connection *conn) {
+  char *idstr = query_value(conn, "id");
+  unsigned long id = idstr ? strtoul(idstr, NULL, 10) : 0;
+  file_task_t *task;
+  int found = 0;
+
+  free(idstr);
+  pthread_mutex_lock(&g_tasks_lock);
+  task = find_task_locked(id);
+  if(task && task->op == TASK_URL_DOWNLOAD && task->state == TASK_RUNNING) {
+    atomic_store_explicit(&task->pause_requested, 1, memory_order_release);
+    task->updated_at = time(NULL);
+    found = 1;
+  }
+  pthread_mutex_unlock(&g_tasks_lock);
+  return found ? send_json_ok(conn) :
+    send_json_error(conn, MHD_HTTP_NOT_FOUND, "running URL download not found");
+}
+
+static enum MHD_Result
+api_download_resume_or_retry(struct MHD_Connection *conn, int retry) {
+  char *idstr = query_value(conn, "id");
+  unsigned long id = idstr ? strtoul(idstr, NULL, 10) : 0;
+  file_task_t *task;
+  pthread_t thread;
+  int found = 0;
+
+  free(idstr);
+  pthread_mutex_lock(&g_tasks_lock);
+  task = find_task_locked(id);
+  if(task && task->op == TASK_URL_DOWNLOAD &&
+     (retry ? task->state == TASK_FAILED : task->state == TASK_PAUSED)) {
+    atomic_store_explicit(&task->cancel_requested, 0, memory_order_release);
+    atomic_store_explicit(&task->pause_requested, 0, memory_order_release);
+    task->state = TASK_QUEUED;
+    task->error[0] = 0;
+    task->updated_at = time(NULL);
+    found = 1;
+  }
+  pthread_mutex_unlock(&g_tasks_lock);
+  if(!found) {
+    return send_json_error(conn, MHD_HTTP_NOT_FOUND,
+                           retry ? "failed URL download not found" :
+                                   "paused URL download not found");
+  }
+  if(pthread_create(&thread, NULL, task_worker, task)) {
+    task_update(task, TASK_FAILED, task->src, 0, "download worker creation failed");
+    return send_json_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+                           "download worker creation failed");
+  }
+  pthread_detach(thread);
+  return send_json_ok(conn);
 }
 
 void
@@ -3032,6 +3132,11 @@ filemgr_cancel_and_wait_for_tasks(void) {
       }
     }
     pthread_mutex_unlock(&g_tasks_lock);
+    /* Workers waiting for a bounded URL-download slot otherwise have no
+     * socket event to observe their cancellation during payload shutdown. */
+    pthread_mutex_lock(&g_url_download_lock);
+    pthread_cond_broadcast(&g_url_download_slot);
+    pthread_mutex_unlock(&g_url_download_lock);
     if(!active) return;
     usleep(10000);
   }
@@ -3463,6 +3568,9 @@ filemgr_api_request(struct MHD_Connection *conn, const char *url,
                     const char *method, const char *body, size_t body_size) {
   if((!strcmp(url, "/api/convert") || !strcmp(url, "/api/extract") ||
       !strcmp(url, "/api/url-download") || !strcmp(url, "/api/cancel") ||
+      !strcmp(url, "/api/download/pause") ||
+      !strcmp(url, "/api/download/resume") ||
+      !strcmp(url, "/api/download/retry") ||
       !strcmp(url, "/api/exit") || !strcmp(url, "/api/copy") ||
       !strcmp(url, "/api/move") || !strcmp(url, "/api/delete") ||
       !strcmp(url, "/api/upload/prepare") ||
@@ -3484,6 +3592,15 @@ filemgr_api_request(struct MHD_Connection *conn, const char *url,
   }
   if(!strcmp(url, "/api/url-download")) {
     return strcmp(method, MHD_HTTP_METHOD_POST) ? send_json_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED, "invalid method") : api_url_download(conn);
+  }
+  if(!strcmp(url, "/api/download/pause")) {
+    return strcmp(method, MHD_HTTP_METHOD_POST) ? send_json_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED, "invalid method") : api_download_pause(conn);
+  }
+  if(!strcmp(url, "/api/download/resume")) {
+    return strcmp(method, MHD_HTTP_METHOD_POST) ? send_json_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED, "invalid method") : api_download_resume_or_retry(conn, 0);
+  }
+  if(!strcmp(url, "/api/download/retry")) {
+    return strcmp(method, MHD_HTTP_METHOD_POST) ? send_json_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED, "invalid method") : api_download_resume_or_retry(conn, 1);
   }
   if(!strcmp(url, "/api/space")) return api_space(conn);
   if(!strcmp(url, "/api/cancel")) return api_cancel(conn);

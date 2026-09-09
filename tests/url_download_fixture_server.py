@@ -15,7 +15,25 @@ class Handler(BaseHTTPRequestHandler):
         return
 
     def send_payload(self, payload, slow=False):
-        self.send_response(200)
+        start = 0
+        range_header = self.headers.get("Range", "")
+        if range_header:
+            if not range_header.startswith("bytes=") or not range_header.endswith("-"):
+                self.send_error(416, "invalid range")
+                return
+            try:
+                start = int(range_header[6:-1])
+            except ValueError:
+                self.send_error(416, "invalid range")
+                return
+            if start < 0 or start >= len(payload):
+                self.send_error(416, "range unavailable")
+                return
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{len(payload) - 1}/{len(payload)}")
+            payload = payload[start:]
+        else:
+            self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Connection", "close")

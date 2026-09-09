@@ -95,12 +95,27 @@ try:
             # exceed the space that is currently available. Keep the sparse
             # logical length within ordinary filesystem limits.
             sparse.truncate(available // 2 + 65536)
-        status, _ = call("/api/convert?" + urllib.parse.urlencode({
+        status, body = call("/api/convert?" + urllib.parse.urlencode({
             "source": str(source), "destination": str(output),
             "name": "unsafe-space.ffpfsc", "profile": "7"
         }))
-        if status != 507 or (output / "unsafe-space.ffpfsc").exists():
-            raise RuntimeError(f"unsafe conversion space check status {status}")
+        if status != 200:
+            raise RuntimeError(f"unsafe conversion queue status {status}")
+        task_id = json.loads(body)["task_id"]
+        deadline = time.monotonic() + 30
+        while True:
+            status, body = call("/api/tasks", method="GET")
+            task = next((item for item in json.loads(body)["tasks"]
+                         if item["id"] == task_id), None)
+            if task and task["state"] in ("done", "failed", "canceled"):
+                if task["state"] != "failed":
+                    raise RuntimeError(f"unsafe conversion ended {task['state']}")
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError("unsafe conversion did not fail safely")
+            time.sleep(0.1)
+        if (output / "unsafe-space.ffpfsc").exists():
+            raise RuntimeError("unsafe conversion published output")
         huge.unlink()
         status, body = call("/api/convert?" + urllib.parse.urlencode({
             "source": str(source), "destination": str(output),

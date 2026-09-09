@@ -1,7 +1,7 @@
 :root {
   font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: #111316;
-  color: #edf0f2;
+  background: #071329;
+  color: #edf5ff;
 }
 
 * {
@@ -22,15 +22,15 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #111316;
-  color: #aab4be;
+  background: #071329;
+  color: #9bb7de;
   font-size: 18px;
 }
 
 body {
   margin: 0;
   min-height: 100vh;
-  background: #111316;
+  background: radial-gradient(circle at 85% -20%, #1a3f81 0, #071329 43%, #040914 100%);
   font-size: 20px;
   overflow: hidden;
 }
@@ -52,8 +52,8 @@ body {
   flex-wrap: wrap;
   justify-content: space-between;
   padding: 0 18px;
-  background: #1b2026;
-  border-bottom: 1px solid #2d343d;
+  background: linear-gradient(105deg, #0b1c39, #102b5d);
+  border-bottom: 1px solid #2d5fa4;
   overflow: visible;
 }
 
@@ -67,7 +67,27 @@ body {
 .top-left {
   flex: 1 1 0;
   min-width: 0;
-  margin-top: 15px;
+  margin-top: 9px;
+}
+
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 9px;
+  margin: 0 18px 9px 0;
+  color: #ffffff;
+  font-size: 19px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
+
+.brand-mark img {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  box-shadow: 0 0 0 1px rgba(99, 218, 255, .8), 0 5px 14px rgba(0, 0, 0, .28);
 }
 
 .top-right {
@@ -81,7 +101,7 @@ body {
 }
 
 .path {
-  color: #aab4be;
+  color: #b7cff2;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 22px;
   line-height: 24px;
@@ -219,8 +239,8 @@ body {
   min-height: 84px;
   justify-content: space-between;
   padding: 15px 18px 0;
-  background: #15191e;
-  border-bottom: 1px solid #2d343d;
+  background: rgba(7, 19, 41, .94);
+  border-bottom: 1px solid #173967;
   overflow: visible;
 }
 
@@ -314,10 +334,10 @@ button,
   min-height: 54px;
   min-width: 96px;
   padding: 0 20px;
-  border: 1px solid #46515f;
-  border-radius: 8px;
-  background: #252c34;
-  color: #f2f5f7;
+  border: 1px solid #2c62a1;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #173c72, #102b55);
+  color: #f3f8ff;
   font: inherit;
   font-size: 20px;
   text-decoration: none;
@@ -330,13 +350,13 @@ button,
 button:focus,
 .button:focus,
 .row-action:focus {
-  outline: 3px solid #6fb1ff;
+  outline: 3px solid #4de1ff;
   outline-offset: 2px;
 }
 
 button:not(.row-action):hover:not(:disabled),
 .button:hover:not(:disabled) {
-  background: #303945;
+  background: linear-gradient(180deg, #225297, #173b73);
 }
 
 button:disabled,
@@ -347,17 +367,17 @@ button:disabled,
 }
 
 .danger {
-  border-color: #8f4545;
-  background: #402326;
+  border-color: #bf4d75;
+  background: linear-gradient(180deg, #682947, #451d36);
 }
 
 .primary {
-  border-color: #4f9f7b;
-  background: #285943;
+  border-color: #48d1ca;
+  background: linear-gradient(180deg, #117a80, #0b545e);
 }
 
 button.primary:hover:not(:disabled) {
-  background: #347358;
+  background: linear-gradient(180deg, #15949a, #0e6971);
 }
 
 .secondary {
@@ -1064,6 +1084,23 @@ input[type="checkbox"] {
   display: none;
 }
 
+.task-overlay.download-dock {
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding: 20px;
+  background: transparent;
+  pointer-events: none;
+}
+
+.task-overlay.download-dock .task-panel {
+  width: 620px;
+  max-width: calc(100vw - 40px);
+  padding: 20px;
+  pointer-events: auto;
+  background: rgba(7, 19, 41, .96);
+  border-color: #2c62a1;
+}
+
 .task-panel {
   width: 980px;
   max-width: calc(100vw - 96px);
@@ -1088,6 +1125,21 @@ input[type="checkbox"] {
 
 .task .danger {
   width: 100%;
+}
+
+.task-controls {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.task-controls > button {
+  min-width: 104px;
+}
+
+.task-controls > .danger {
+  flex: 1 1 150px;
 }
 
 .task-head {

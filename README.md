@@ -1,6 +1,6 @@
-# RAR to FFPFSC PS5 Payload
+# MkPFS-PS5
 
-RAR to FFPFSC PS5 Payload is a userland payload for jailbroken PlayStation 5 consoles. It combines a PS5 web file manager with native RAR/7z extraction, folder-to-`.ffpfsc` conversion compatible with MkPFS, and direct URL downloads. The browser interface is designed for phones, desktop browsers, and the PS5 browser with a controller.
+MkPFS-PS5 is a userland payload for jailbroken PlayStation 5 consoles. It combines a PS5 web file manager with native RAR/7z extraction, folder-to-`.ffpfsc` conversion compatible with MkPFS, and direct URL downloads. The browser interface is designed for phones, desktop browsers, and the PS5 browser with a controller.
 
 > **Important:** The product name does not mean that a RAR file can be converted directly to `.ffpfsc` in one step. The supported workflow is: extract the RAR or 7z archive to a folder, inspect the extracted files, and then convert that folder to `.ffpfsc`.
 
@@ -42,16 +42,16 @@ I built this payload to keep the everyday PS5 file workflow in one place: browse
 4. Open the following address from a phone or computer on the same local network:
 
    ```text
-   http://PS5-IP:6777/
+   http://PS5-IP:8888/
    ```
 
    Replace `PS5-IP` with your console's local IP address.
 
 5. On the first run, browse files only. Confirm that the mounted locations you need are readable before starting a conversion, extraction, or download.
 
-Port **6777** is the normal listening port. A valid `WFM_PORT` environment value can deliberately select a different port. If `WFM_PORT` is unset, empty, invalid, or `0`, the payload uses port 6777. The startup notification and managed launcher follow the port that actually bound successfully.
+Port **8888** is the normal listening port. A valid `WFM_PORT` environment value can deliberately select a different port. If `WFM_PORT` is unset, empty, invalid, or `0`, the payload uses port 8888. The startup notification and managed launcher follow the port that actually bound successfully.
 
-If port 6777 is already in use, the payload does not silently switch to an unknown port. Free the port or deliberately configure a valid `WFM_PORT` override before loading the payload.
+If the requested port is already in use, the payload tries the next port (`8888`, `8889`, …). The notification and launcher use only the port that finished both listener and HTTP-daemon initialization.
 
 ### Current runtime verification
 
@@ -129,19 +129,20 @@ For safer output handling, extraction happens in a private `.mkpfs-extract-<task
 
 Downloads use a fixed 64 KiB streaming buffer. When the server provides a content length, the Jobs panel can show progress, speed, and ETA. Streams without a known length still show transferred bytes and speed where available.
 
-The output filename must be one safe filename. Existing destination files are rejected. Each download is written to a private temporary file in the same directory and published only after it completes successfully. On filesystems that support it, publication uses a no-replace hard-link step. On FAT/exFAT, the payload checks again for an existing name before the same-directory rename. Failed downloads, cancellations, invalid responses, and write errors remove the temporary file.
+The output filename must be one safe filename. Existing destination files are rejected. Each download is written to a private temporary file in the same directory and published only after it completes successfully. On filesystems that support it, publication uses a no-replace hard-link step. On FAT/exFAT, the payload checks again for an existing name before the same-directory rename. Cancellation removes its temporary file. A transient failure or payload restart retains a validated private part file and atomic journal, retries with an HTTP Range request, and never publishes a partial final name.
 
-The PS5 build uses SceHttp for direct HTTP and HTTPS GET requests. HTTPS certificate verification is not disabled. Authenticated sources, cookies, custom headers, request bodies, redirects, checksum manifests, resume, and concurrent transfers are not supported. Use a final direct URL from a source you trust. To retry a failed download, correct the URL or destination and start a new job.
+The PS5 build uses SceHttp for direct HTTP and HTTPS GET requests. HTTPS certificate verification is not disabled. Authenticated sources, cookies, custom headers, request bodies, redirects, and checksum manifests are not supported. Use a final direct URL from a source you trust. The manager supports two active URL transfers and a bounded queue of eight jobs, with pause, retry, and restart recovery through safe range requests.
 
 ## Settings, jobs, progress, and cancellation
 
-Compression and archive worker settings accept `auto` or an integer from 1 through 8. Only one filesystem job runs at a time. I chose that behavior to keep disk use, output ownership, destination validation, and cancellation predictable.
+Compression and archive worker settings accept `auto` or an integer from 1 through 8. Conversion, extraction, copy, move, delete, and permission work remain exclusive filesystem jobs. Direct URL downloads use an independent bounded two-worker queue so they cannot create unbounded memory or descriptor pressure.
 
 | Job state | Meaning |
 | --- | --- |
 | **Queued** | The job was accepted and is waiting to begin. |
 | **Preparing / Checking** | The source, destination, free space, or other prerequisites are being checked. |
 | **Running** | Data is being converted, extracted, copied, moved, or downloaded. |
+| **Paused** | A URL download stopped at its last durable checkpoint and can resume safely. |
 | **Finishing** | Output synchronization and final publication are in progress. |
 | **Done** | The final output was published successfully. |
 | **Failed** | The job ended with an error; read the displayed message. |
@@ -153,19 +154,19 @@ Cancellation is cooperative. Conversion checks between streamed work units, extr
 
 | Problem | What to check |
 | --- | --- |
-| The web page does not open | Confirm the PS5 IP address, use `http://PS5-IP:6777/`, and confirm that the startup notification reported a running server. If you explicitly configured `WFM_PORT`, use the configured/bound port instead. |
-| No startup notification appears | Confirm that the new ELF was selected in the payload manager and that port 6777 is not occupied. The payload logs the return code if `sceKernelSendNotificationRequest` rejects the request. Check payload-manager logs if they are available. |
+| The web page does not open | Confirm the PS5 IP address, use `http://PS5-IP:8888/`, and confirm that the startup notification reported a running server. If the preferred port was occupied, use the actual port shown in the notification. |
+| No startup notification appears | Confirm that the new ELF was selected in the payload manager. The payload logs the return code if `sceKernelSendNotificationRequest` rejects the request. Check payload-manager logs if they are available. |
 | The Home Screen launcher does not appear | The payload refreshes only its own title registration before installing the launcher metadata. Confirm server readiness first; launcher visibility and installation permissions still need verification on physical PS5 hardware. |
 | No files or folders appear | Refresh the UI and inspect the readable roots. The root API reports existing `/mnt` child directories in addition to standard locations. Browse only mounted paths that really exist. Do not bypass permissions with kernel patches. |
 | Conversion or extraction is rejected | Check the source type, destination existence, write access, free space, output name, and whether a file or folder with that name already exists. |
 | A conversion stopped after a page reload or payload reload | Reloading a payload manager ends the old process, so the original progress bar and in-memory job history disappear. Start the current payload again: it scans `/data/mkpfs-resume`, restores one valid conversion, and shows a new **resuming conversion** job. The UI cannot display work that occurred while the payload was offline. During exFAT creation, recovery continues from the last whole-file checkpoint after validating the unchanged source tree. After the exFAT snapshot is durable, PFSC/PFS work resumes from the private stage without rescanning the source. If recovery reports an invalid checkpoint or source change, start a new conversion from the original source. Temporary files created by older payload versions predate this journal and are not resumable. |
-| A URL download fails | Use a final direct URL without sign-in or redirects, check PS5 network access and free space, then submit a new job. Do not disable HTTPS certificate checks to work around a TLS error. |
+| A URL download fails | Use a final direct URL without sign-in or redirects, check PS5 network access and free space, then choose **Retry**. Do not disable HTTPS certificate checks to work around a TLS error. |
 | Cancellation does not finish immediately | Cancellation is cooperative. Wait for the current read or work unit to finish and for the job to reach a terminal state. |
 | A `.ffpfsc` file is not usable | Start with a small source folder, confirm the job completed, check the output size, and test it with the expected MkPFS workflow. The upstream verifier is available for host-side validation. |
 
 ## Features
 
-- Port **6777**, kept in sync with the startup notification and managed Home Screen launcher.
+- Port **8888** with sequential fallback, kept in sync with the startup notification and managed Home Screen launcher.
 - PS5 web file browser with explicit source and destination selection.
 - Bounded-memory, deterministic folder-to-`.ffpfsc` conversion.
 - RAR/7z extraction with password input, supported multipart archives, staging, progress, and cooperative cancellation.

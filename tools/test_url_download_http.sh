@@ -12,7 +12,7 @@ mkdir -p "$root/destination"
 
 python3 tests/url_download_fixture_server.py --port "$fixture_port" >"$root/fixture.log" 2>&1 &
 fixture_pid=$!
-WFM_PORT="$server_port" WFM_ACCESS_TOKEN="$token" "$server_bin" >"$root/server.log" 2>&1 &
+WFM_PORT="$server_port" WFM_ACCESS_TOKEN="$token" WFM_DOWNLOAD_DIR="$root/journals" "$server_bin" >"$root/server.log" 2>&1 &
 server_pid=$!
 cleanup() {
   kill "$server_pid" "$fixture_pid" 2>/dev/null || true
@@ -46,7 +46,7 @@ wait_for_state() {
   id=$1
   expected=$2
   state=''
-  for _ in $(seq 1 160); do
+  for _ in $(seq 1 400); do
     state=$(task_state "$id")
     [ "$state" = "$expected" ] && return 0
     case "$state" in failed|canceled|done) break;; esac
@@ -122,5 +122,40 @@ api_post "http://127.0.0.1:$server_port/api/cancel?id=$id" >/dev/null
 wait_for_state "$id" canceled
 [ ! -e "$root/destination/slow.bin" ]
 ! find "$root/destination" -maxdepth 1 -name '.mkpfs-download-*' -print | grep -q .
+
+# A paused direct URL persists its safe part file and journal, then resumes
+# through a validated HTTP Range request without publishing a partial name.
+response=$(api_post "$base?url=http%3A%2F%2F127.0.0.1%3A$fixture_port%2Fslow.bin&destination=$destination&name=paused.bin")
+id=$(task_id_from "$response")
+[ -n "$id" ]
+sleep 0.2
+api_post "http://127.0.0.1:$server_port/api/download/pause?id=$id" >/dev/null
+wait_for_state "$id" paused
+find "$root/destination" -maxdepth 1 -name '.mkpfs-download-*.part' -print | grep -q .
+find "$root/journals" -type f -name 'mkpfs-download-*.resume' -print | grep -q .
+api_post "http://127.0.0.1:$server_port/api/download/resume?id=$id" >/dev/null
+wait_for_state "$id" done
+python3 - "$root/destination/paused.bin" <<'PY'
+from pathlib import Path
+import sys
+assert Path(sys.argv[1]).read_bytes() == bytes(range(256)) * 65536
+PY
+! find "$root/journals" -type f -name 'mkpfs-download-*.resume' -print | grep -q .
+
+# Three slow jobs demonstrate the two-worker bound plus a visible queued job.
+queue_ids=''
+for name in queue-one.bin queue-two.bin queue-three.bin; do
+  response=$(api_post "$base?url=http%3A%2F%2F127.0.0.1%3A$fixture_port%2Fslow.bin&destination=$destination&name=$name")
+  id=$(task_id_from "$response")
+  [ -n "$id" ]
+  queue_ids="$queue_ids $id"
+done
+sleep 0.2
+tasks=$(curl --compressed -fsS -H "X-WFM-Token: $token" "http://127.0.0.1:$server_port/api/tasks")
+[ "$(printf '%s' "$tasks" | grep -o '"op":"url_download"' | wc -l | tr -d ' ')" -ge 3 ]
+printf '%s' "$tasks" | grep -q '"state":"queued"'
+for id in $queue_ids; do
+  api_post "http://127.0.0.1:$server_port/api/cancel?id=$id" >/dev/null
+done
 
 echo 'URL download HTTP integration test passed'

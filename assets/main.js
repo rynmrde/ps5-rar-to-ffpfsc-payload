@@ -16,6 +16,7 @@ let loadingPath = null;
 let directoryLoadingTimer = 0;
 let directoryLoadingStartedAt = 0;
 let taskOverlayTimer = 0;
+let urlQueueEnabled = true;
 let lastCompletionId = null;
 let taskPollFailedAlertShown = false;
 let localActionBusy = false;
@@ -451,7 +452,7 @@ function isPlayStationBrowser() {
 }
 
 function stateLabel(state) {
-  return { queued: t("queued"), running: t("running"), done: t("done"), failed: t("failed"), canceled: t("canceled") }[state] || state;
+  return { queued: t("queued"), running: t("running"), paused: t("paused"), done: t("done"), failed: t("failed"), canceled: t("canceled") }[state] || state;
 }
 
 function isTerminalTask(task) {
@@ -1296,7 +1297,8 @@ function updateButtons() {
   document.getElementById("renameBtn").disabled = locked || items.length !== 1;
   document.getElementById("deleteBtn").disabled = locked || items.length === 0;
   downloadBtn.disabled = locked || items.length === 0;
-  if (urlDownloadBtn) urlDownloadBtn.disabled = locked;
+  if (urlDownloadBtn) urlDownloadBtn.disabled = (contentEl.classList.contains("loading") ||
+    (busy && !urlQueueEnabled));
   document.getElementById("refreshBtn").disabled = locked;
   uploadBtn.disabled = locked;
   uploadMenuBtn.disabled = locked;
@@ -1863,7 +1865,10 @@ async function actionPaste() {
 
 function renderTasks(tasks) {
   const fileTasks = tasks.filter(task => task.op !== "pkg_install");
-  const active = fileTasks.find(task => task.state === "queued" || task.state === "running");
+  urlQueueEnabled = !fileTasks.some(task => task.op !== "url_download" &&
+    (task.state === "queued" || task.state === "running"));
+  const active = fileTasks.find(task => task.state === "queued" || task.state === "running") ||
+    fileTasks.find(task => task.state === "paused" || task.state === "failed");
   if (!active && pendingOverlayText) {
     renderPendingOverlay(pendingOverlayText, pendingOverlayLabel);
     showTaskOverlay();
@@ -1872,6 +1877,7 @@ function renderTasks(tasks) {
 
   tasksEl.innerHTML = "";
   const hasActive = Boolean(active);
+  overlayEl.classList.toggle("download-dock", hasActive && urlQueueEnabled);
   if (hasActive) showTaskOverlay(false, active.op === "download" ?
     DOWNLOAD_OVERLAY_DISPLAY_DELAY : LOADING_DISPLAY_DELAY);
   else {
@@ -1958,9 +1964,37 @@ function renderTasks(tasks) {
     }
   });
 
-  if (isDelete) appendChildren(div, head, current, cancel);
-  else if (total && !isFinishing) appendChildren(div, head, current, meta, progress, cancel);
-  else appendChildren(div, head, current, progress, cancel);
+  const controls = document.createElement("div");
+  controls.className = "task-controls";
+  if (task.op === "url_download" && task.state === "running") {
+    const pause = document.createElement("button");
+    pause.className = "secondary";
+    pause.textContent = t("pause");
+    bindPress(pause, () => api("/api/download/pause", { id: task.id })
+      .then(pollTasks).catch(err => setStatus(t("actionFailed", { label: t("pause"), error: err.message }))));
+    controls.appendChild(pause);
+  }
+  if (task.op === "url_download" && task.state === "paused") {
+    const resume = document.createElement("button");
+    resume.className = "primary";
+    resume.textContent = t("resume");
+    bindPress(resume, () => api("/api/download/resume", { id: task.id })
+      .then(pollTasks).catch(err => setStatus(t("actionFailed", { label: t("resume"), error: err.message }))));
+    controls.appendChild(resume);
+  }
+  if (task.op === "url_download" && task.state === "failed") {
+    const retry = document.createElement("button");
+    retry.className = "primary";
+    retry.textContent = t("retry");
+    bindPress(retry, () => api("/api/download/retry", { id: task.id })
+      .then(pollTasks).catch(err => setStatus(t("actionFailed", { label: t("retry"), error: err.message }))));
+    controls.appendChild(retry);
+  }
+  controls.appendChild(cancel);
+
+  if (isDelete) appendChildren(div, head, current, controls);
+  else if (total && !isFinishing) appendChildren(div, head, current, meta, progress, controls);
+  else appendChildren(div, head, current, progress, controls);
   tasksEl.appendChild(div);
   if (!task.error) renderTaskPath(current, task.current || task.src);
 }
@@ -2284,7 +2318,7 @@ function urlDownloadFilename(url) {
 }
 
 async function actionUrlDownload() {
-  if (busy || loadingPath) return;
+  if ((busy && !urlQueueEnabled) || loadingPath) return;
   const url = (prompt(t("downloadUrlPrompt"), "https://") || "").trim();
   if (!url) return;
   const destination = (prompt(t("downloadDestinationPrompt"), cwd) || "").trim();

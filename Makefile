@@ -1,4 +1,4 @@
-ifneq ($(filter-out linux linux-deps test-native test-resume test-conversion-recovery test-exfat-recovery test-exfat-source-change test-archive test-url-download test-default-port benchmark-finalization archive-lib mkpfs-pfsc mkpfs-wrap-exfat mkpfs-exfat mkpfs-convert-folder compat-upstream clean,$(MAKECMDGOALS)),)
+ifneq ($(filter-out linux linux-deps test-native test-resume test-conversion-recovery test-exfat-recovery test-exfat-source-change test-archive test-url-download test-url-download-recovery test-default-port benchmark-finalization archive-lib mkpfs-pfsc mkpfs-wrap-exfat mkpfs-exfat mkpfs-convert-folder compat-upstream clean,$(MAKECMDGOALS)),)
   ifdef PS5_PAYLOAD_SDK
     include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
   else
@@ -13,7 +13,7 @@ ifeq ($(MAKECMDGOALS),)
   endif
 endif
 
-VERSION_TAG := v0.3.8
+VERSION_TAG := v0.4.0
 TITLE_ID    := FMGR88888
 PYTHON      ?= python3
 STRIP       ?= $(PS5_PAYLOAD_SDK)/bin/prospero-strip
@@ -48,7 +48,7 @@ LINUX_CFLAGS := -O2 -flto -Wall -Werror -Isrc -DVERSION_TAG=\"$(VERSION_TAG)\" -
 LINUX_CFLAGS += `$(HOST_PKG_CONFIG) libmicrohttpd --cflags`
 LINUX_LDADD := `$(HOST_PKG_CONFIG) libmicrohttpd --libs` -pthread -lz -lstdc++
 
-.PHONY: all linux test-native test-resume test-conversion-recovery test-exfat-recovery test-exfat-source-change test-archive test-url-download test-default-port benchmark-finalization mkpfs-pfsc mkpfs-wrap-exfat mkpfs-exfat mkpfs-convert-folder compat-upstream deps linux-deps archive-lib clean
+.PHONY: all linux test-native test-resume test-conversion-recovery test-exfat-recovery test-exfat-source-change test-archive test-url-download test-url-download-recovery test-default-port benchmark-finalization mkpfs-pfsc mkpfs-wrap-exfat mkpfs-exfat mkpfs-convert-folder compat-upstream deps linux-deps archive-lib clean
 
 all: deps $(BIN)
 
@@ -78,6 +78,9 @@ test-archive: tests/test_archive_extract
 
 test-url-download: linux
 	./tools/test_url_download_http.sh
+
+test-url-download-recovery: linux
+	./tools/test_url_download_restart_recovery.sh
 
 test-default-port: linux
 	./tools/test_default_port.sh

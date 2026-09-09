@@ -36,6 +36,7 @@ task_state_name(task_state_t state) {
   switch(state) {
   case TASK_QUEUED: return "queued";
   case TASK_RUNNING: return "running";
+  case TASK_PAUSED: return "paused";
   case TASK_DONE: return "done";
   case TASK_FAILED: return "failed";
   case TASK_CANCELED: return "canceled";
@@ -86,7 +87,9 @@ remove_finished_tasks_locked(void) {
   while(*link) {
     file_task_t *task = *link;
 
-    if(task_is_active(task) || task->active_streams ||
+    if(task_is_active(task) || task->state == TASK_PAUSED ||
+       (task->op == TASK_URL_DOWNLOAD && task->state == TASK_FAILED) ||
+       task->active_streams ||
        (task->op == TASK_PKG_INSTALL && !task->reported)) {
       link = &task->next;
       continue;

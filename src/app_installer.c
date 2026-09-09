@@ -34,6 +34,16 @@ INCASSET(icon0_png, "assets/icon0.png");
 int sceAppInstUtilAppInstallAll(void *);
 int sceAppInstUtilAppUnInstall(const char *);
 
+void
+app_register_assets(void) {
+  static int registered;
+
+  if(!registered) {
+    asset_register("/icon0.png", icon0_png, icon0_png_size, "image/png", 0);
+    registered = 1;
+  }
+}
+
 static int
 install_file(const char *path, const uint8_t *data, size_t size) {
   struct stat st;
@@ -123,6 +133,40 @@ write_owned_param(const char *path, const char *data, size_t size) {
   return 0;
 }
 
+static int
+write_owned_binary(const char *path, const uint8_t *data, size_t size) {
+  char tmp[PATH_MAX];
+  struct stat st;
+  FILE *f;
+  int fd;
+
+  if(lstat(path, &st) == 0 && (!S_ISREG(st.st_mode) || st.st_nlink != 1)) {
+    errno = EINVAL;
+    return -1;
+  }
+  if(lstat(path, &st) && errno != ENOENT) return -1;
+  if(snprintf(tmp, sizeof(tmp), "%s.tmp.XXXXXX", path) >= (int)sizeof(tmp)) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+  fd = mkstemp(tmp);
+  if(fd < 0) return -1;
+  f = fdopen(fd, "wb");
+  if(!f) {
+    close(fd);
+    unlink(tmp);
+    return -1;
+  }
+  if(fwrite(data, size, 1, f) != 1 || fflush(f) || fsync(fileno(f)) ||
+     fclose(f) || rename(tmp, path)) {
+    int error = errno ? errno : EIO;
+    unlink(tmp);
+    errno = error;
+    return -1;
+  }
+  return 0;
+}
+
 int
 app_install_if_needed(unsigned short port) {
   const char *title_id = TITLE_ID;
@@ -133,7 +177,7 @@ app_install_if_needed(unsigned short port) {
   int err;
   char param_json[512];
 
-  asset_register("/icon0.png", icon0_png, icon0_png_size, "image/png", 0);
+  app_register_assets();
 
   snprintf(base_dir, sizeof(base_dir), "/user/app/%s", title_id);
   snprintf(sce_sys_dir, sizeof(sce_sys_dir), "/user/app/%s/sce_sys", title_id);
@@ -146,9 +190,9 @@ app_install_if_needed(unsigned short port) {
            "  \"deeplinkUri\": \"http://127.0.0.1:%u/\",\n"
            "  \"localizedParameters\": {\n"
            "    \"defaultLanguage\": \"en-US\",\n"
-           "    \"en-US\": {\"titleName\": \"RAR to FFPFSC PS5 Payload\"},\n"
-           "    \"zh-Hans\": {\"titleName\": \"RAR to FFPFSC PS5 Payload\"},\n"
-           "    \"zh-Hant\": {\"titleName\": \"RAR to FFPFSC PS5 Payload\"}\n"
+           "    \"en-US\": {\"titleName\": \"MkPFS-PS5\"},\n"
+           "    \"zh-Hans\": {\"titleName\": \"MkPFS-PS5\"},\n"
+           "    \"zh-Hant\": {\"titleName\": \"MkPFS-PS5\"}\n"
            "  }\n}\n", title_id, (unsigned int)port);
 
   printf("Installing or refreshing launcher app %s on port %u\n",
@@ -171,7 +215,7 @@ app_install_if_needed(unsigned short port) {
     return -1;
   }
   if(write_owned_param(param_path, param_json, strlen(param_json)) ||
-     install_file(icon_path, icon0_png, icon0_png_size)) {
+     write_owned_binary(icon_path, icon0_png, icon0_png_size)) {
     perror("install launcher assets");
     return -1;
   }

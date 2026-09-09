@@ -1,17 +1,17 @@
 {
   "applicationCategoryType": 65536,
   "titleId": "FMGR88888",
-  "deeplinkUri": "http://127.0.0.1:6777/",
+  "deeplinkUri": "http://127.0.0.1:8888/",
   "localizedParameters": {
     "defaultLanguage": "en-US",
     "en-US": {
-      "titleName": "RAR to FFPFSC PS5 Payload"
+      "titleName": "MkPFS-PS5"
     },
     "zh-Hans": {
-      "titleName": "RAR to FFPFSC PS5 Payload"
+      "titleName": "MkPFS-PS5"
     },
     "zh-Hant": {
-      "titleName": "RAR to FFPFSC PS5 Payload"
+      "titleName": "MkPFS-PS5"
     }
   }
 }

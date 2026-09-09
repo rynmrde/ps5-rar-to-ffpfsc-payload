@@ -28,6 +28,7 @@ typedef enum task_op {
 typedef enum task_state {
   TASK_QUEUED,
   TASK_RUNNING,
+  TASK_PAUSED,
   TASK_DONE,
   TASK_FAILED,
   TASK_CANCELED,
@@ -54,6 +55,9 @@ typedef struct file_task {
   mkpfs_resume_state_t conversion_resume;
   int conversion_recovered;
   char archive_password[256];
+  char download_temporary[PATH_MAX];
+  char download_journal[PATH_MAX];
+  unsigned long long download_checkpoint_done;
   char **srcs;
   size_t src_count;
   size_t file_count;
@@ -73,6 +77,7 @@ typedef struct file_task {
   unsigned int eta_sample_next;
   unsigned int eta_sample_count;
   atomic_int cancel_requested;
+  atomic_int pause_requested;
   int reported; /* Terminal state has been included in /api/tasks. */
   unsigned int active_streams;
   time_t created_at;
@@ -138,6 +143,8 @@ enum MHD_Result api_download_prepare(struct MHD_Connection *conn,
 enum MHD_Result api_download(struct MHD_Connection *conn);
 enum MHD_Result api_url_download(struct MHD_Connection *conn);
 int url_download_task_run(file_task_t *task);
+int url_download_resume_interrupted(void);
+void url_download_discard_state(file_task_t *task);
 enum MHD_Result api_list(struct MHD_Connection *conn);
 enum MHD_Result api_space(struct MHD_Connection *conn);
 enum MHD_Result api_text(struct MHD_Connection *conn);
