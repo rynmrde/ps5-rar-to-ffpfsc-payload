@@ -20,9 +20,6 @@
 #define HTTP_CONNECTION_MEMORY_INCREMENT (2 * 1024 * 1024)
 #define HTTP_SOCKET_RCVBUF_SIZE (4 * 1024 * 1024)
 #define HTTP_SOCKET_SNDBUF_SIZE (4 * 1024 * 1024)
-#define HTTP_CONNECTION_LIMIT 8u
-#define HTTP_PER_IP_CONNECTION_LIMIT 4u
-#define HTTP_CONNECTION_TIMEOUT_SECONDS 30u
 #define HTTP_ACCESS_TOKEN_MAX 64u
 
 static volatile sig_atomic_t g_stop_requested;
@@ -133,6 +130,7 @@ websrv_body_too_large(struct MHD_Connection *conn) {
 enum MHD_Result
 websrv_queue_response(struct MHD_Connection *conn, unsigned int status,
                       struct MHD_Response *resp) {
+  MHD_add_response_header(resp, MHD_HTTP_HEADER_ACCESS_CONTROL_ALLOW_ORIGIN, "*");
   MHD_add_response_header(resp, MHD_HTTP_HEADER_CACHE_CONTROL, "no-store");
   return MHD_queue_response(conn, status, resp);
 }
@@ -307,7 +305,7 @@ websrv_listen(unsigned short port) {
     close(srvfd);
     return -1;
   }
-  if(listen(srvfd, 16)) {
+  if(listen(srvfd, SOMAXCONN)) {
     perror("listen");
     close(srvfd);
     return -1;
@@ -326,7 +324,7 @@ websrv_listen(unsigned short port) {
   g_stop_requested = 0;
   g_listen_fd = srvfd;
 
-  if(!(httpd = MHD_start_daemon(MHD_USE_ITC |
+  if(!(httpd = MHD_start_daemon(MHD_USE_THREAD_PER_CONNECTION | MHD_USE_ITC |
                                 MHD_USE_NO_LISTEN_SOCKET | MHD_USE_DEBUG |
                                 MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_TURBO,
                                 0, NULL, NULL, &websrv_on_request, NULL,
@@ -334,16 +332,11 @@ websrv_listen(unsigned short port) {
                                 (size_t)HTTP_CONNECTION_MEMORY_LIMIT,
                                 MHD_OPTION_CONNECTION_MEMORY_INCREMENT,
                                 (size_t)HTTP_CONNECTION_MEMORY_INCREMENT,
-                                MHD_OPTION_CONNECTION_LIMIT,
-                                (unsigned int)HTTP_CONNECTION_LIMIT,
-                                MHD_OPTION_PER_IP_CONNECTION_LIMIT,
-                                (unsigned int)HTTP_PER_IP_CONNECTION_LIMIT,
-                                MHD_OPTION_CONNECTION_TIMEOUT,
-                                (unsigned int)HTTP_CONNECTION_TIMEOUT_SECONDS,
                                 MHD_OPTION_NOTIFY_COMPLETED,
                                 &websrv_on_completed, NULL, MHD_OPTION_END))) {
     perror("MHD_start_daemon");
     close(srvfd);
+    g_listen_fd = -1;
     return -1;
   }
 
@@ -363,12 +356,9 @@ websrv_listen(unsigned short port) {
     websrv_tune_connection_socket(connfd);
     if(MHD_add_connection(httpd, connfd, (struct sockaddr *)&client_addr,
                           addr_len) != MHD_YES) {
-      /* A rejected peer (for example, a client exceeding the bounded MHD
-       * connection limit) must not tear down the listener or cancel a long
-       * filesystem job. Drop only that socket and keep serving existing work. */
-      fprintf(stderr, "MHD_add_connection rejected client; keeping server alive\n");
+      perror("MHD_add_connection");
       close(connfd);
-      continue;
+      break;
     }
   }
 

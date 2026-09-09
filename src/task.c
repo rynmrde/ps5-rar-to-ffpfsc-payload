@@ -86,7 +86,7 @@ remove_finished_tasks_locked(void) {
   while(*link) {
     file_task_t *task = *link;
 
-    if(task_is_active(task) || task->active_streams ||
+    if(task_is_active(task) || task->worker_active || task->active_streams ||
        (task->op == TASK_PKG_INSTALL && !task->reported)) {
       link = &task->next;
       continue;
