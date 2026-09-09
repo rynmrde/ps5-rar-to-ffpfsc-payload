@@ -16,14 +16,36 @@
 #include "websrv.h"
 
 #define REQUEST_BODY_MAX (4 * 1024 * 1024)
-#define HTTP_CONNECTION_MEMORY_LIMIT (8 * 1024 * 1024)
-#define HTTP_CONNECTION_MEMORY_INCREMENT (2 * 1024 * 1024)
-#define HTTP_SOCKET_RCVBUF_SIZE (4 * 1024 * 1024)
-#define HTTP_SOCKET_SNDBUF_SIZE (4 * 1024 * 1024)
-#define HTTP_CONNECTION_LIMIT 8u
-#define HTTP_PER_IP_CONNECTION_LIMIT 4u
-#define HTTP_CONNECTION_TIMEOUT_SECONDS 30u
+#define HTTP_CONNECTION_MEMORY_LIMIT (512 * 1024)
+#define HTTP_CONNECTION_MEMORY_INCREMENT (64 * 1024)
+#define HTTP_SOCKET_RCVBUF_SIZE (512 * 1024)
+#define HTTP_SOCKET_SNDBUF_SIZE (512 * 1024)
+#define HTTP_CONNECTION_LIMIT 32u
+#define HTTP_PER_IP_CONNECTION_LIMIT 16u
+#define HTTP_CONNECTION_TIMEOUT_SECONDS 120u
 #define HTTP_ACCESS_TOKEN_MAX 64u
+
+static int
+websrv_accept_error_retryable(int error) {
+  switch(error) {
+  case EAGAIN:
+#if EWOULDBLOCK != EAGAIN
+  case EWOULDBLOCK:
+#endif
+  case ECONNABORTED:
+  case ENOBUFS:
+  case ENOMEM:
+  case ENETDOWN:
+  case ENETUNREACH:
+  case EHOSTDOWN:
+  case EHOSTUNREACH:
+  case EPROTO:
+  case EIO:
+    return 1;
+  default:
+    return 0;
+  }
+}
 
 static volatile sig_atomic_t g_stop_requested;
 static int g_listen_fd = -1;
@@ -42,7 +64,7 @@ websrv_tune_connection_socket(int fd) {
   const int sndbuf = HTTP_SOCKET_SNDBUF_SIZE;
   const int nodelay = 1;
 
-  /* OrbisOS HTTP sockets need an explicit send buffer to fill a GbE link. */
+  /* Keep a practical window without reserving 4 MiB per accepted peer. */
   (void)setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
   (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 }
@@ -321,7 +343,6 @@ websrv_listen(unsigned short port) {
       return -1;
     }
     port = ntohs(bound_addr.sin_port);
-    printf("listening on port %u\n", (unsigned int)port);
   }
   g_stop_requested = 0;
   g_listen_fd = srvfd;
@@ -347,6 +368,7 @@ websrv_listen(unsigned short port) {
     return -1;
   }
 
+  printf("listening on port %u\n", (unsigned int)port);
   if(g_ready_callback) {
     g_ready_callback(port, g_ready_callback_arg);
   }
@@ -355,6 +377,26 @@ websrv_listen(unsigned short port) {
     addr_len = sizeof(client_addr);
     if((connfd = accept(srvfd, (struct sockaddr *)&client_addr, &addr_len)) < 0) {
       if(errno == EINTR) {
+        continue;
+      }
+      if(errno == ECONNABORTED || errno == EAGAIN || errno == EWOULDBLOCK) {
+        continue;
+      }
+      if(errno == EMFILE || errno == ENFILE) {
+        /* Do not tear down active MHD connections or filesystem workers merely
+         * because accepts are temporarily exhausted. */
+        if(!g_stop_requested) {
+          fprintf(stderr, "accept temporarily out of file descriptors\n");
+          usleep(100000);
+        }
+        continue;
+      }
+      if(websrv_accept_error_retryable(errno)) {
+        if(!g_stop_requested) {
+          fprintf(stderr, "accept temporarily unavailable: %s\n",
+                  strerror(errno));
+          usleep(100000);
+        }
         continue;
       }
       if(!g_stop_requested) perror("accept");

@@ -74,6 +74,7 @@ typedef struct file_task {
   unsigned int eta_sample_count;
   atomic_int cancel_requested;
   int reported; /* Terminal state has been included in /api/tasks. */
+  int worker_active; /* Detached worker owns this task until it returns. */
   unsigned int active_streams;
   time_t created_at;
   time_t transfer_started_at;
