@@ -2241,6 +2241,13 @@ task_worker_release(file_task_t *task) {
 }
 
 #define TASK_WORKER_RETURN() do { \
+  if(download_slot) { \
+    pthread_mutex_lock(&g_url_download_lock); \
+    g_url_download_workers--; \
+    pthread_cond_broadcast(&g_url_download_slot); \
+    pthread_mutex_unlock(&g_url_download_lock); \
+    download_slot = 0; \
+  } \
   task_worker_release(task); \
   return NULL; \
 } while(0)

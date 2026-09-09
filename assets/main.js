@@ -36,7 +36,7 @@ let uploadXhr = null;
 let uploadTerminalAbort = false;
 let L = {};
 
-const APP_VERSION = "v0.3.7";
+const APP_VERSION = "v0.4.2";
 const LAST_PATH_KEY = "ps5-web-file-mgr:last-path";
 const SORT_KEY = "ps5-web-file-mgr:list-sort";
 const LOADING_DISPLAY_DELAY = 250;
@@ -234,8 +234,15 @@ async function request(path, params, options) {
   }
   const response = await fetch(path + (qs.toString() ? "?" + qs.toString() : ""), fetchOptions);
   if (!response.ok) {
-    const data = await response.json();
-    throw new Error(backendErrorText(data.error_code, data.error_arg, data.error));
+    const text = await response.text();
+    let data = {};
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch (err) {
+      data = {};
+    }
+    const fallback = data.error || response.statusText || ("HTTP " + response.status);
+    throw new Error(backendErrorText(data.error_code, data.error_arg, fallback));
   }
   return response;
 }

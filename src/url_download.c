@@ -21,6 +21,10 @@
 #include "json_util.h"
 #include "path_util.h"
 
+#ifndef VERSION_TAG
+#define VERSION_TAG "dev"
+#endif
+
 #define URL_DOWNLOAD_BUFFER_SIZE (64U * 1024U)
 #define URL_DOWNLOAD_HTTP_POOL_SIZE (512U * 1024U)
 #define URL_DOWNLOAD_TIMEOUT_US (20U * 1000U * 1000U)
@@ -425,7 +429,7 @@ host_http_open(const char *text, const remote_url_t *url,
     return -1;
   }
   if(snprintf(request, sizeof(request),
-              "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: MkPFS-PS5/0.4\r\n"
+              "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: MkPFS-PS5/" VERSION_TAG "\r\n"
               "Accept: */*\r\n%sConnection: close\r\n\r\n", url->path, url->host,
               range_header) >=
      (int)sizeof(request) || host_send_all(client->fd, request, strlen(request))) {
@@ -663,7 +667,8 @@ url_download_task_run(file_task_t *task) {
       snprintf(error, sizeof(error), "PS5 HTTPS certificate verification setup failed");
       goto sce_done;
     }
-    template_id = sceHttpCreateTemplate("MkPFS-PS5/0.4", SCE_HTTP_VERSION_1_1, 1);
+    template_id = sceHttpCreateTemplate("MkPFS-PS5/" VERSION_TAG,
+                                        SCE_HTTP_VERSION_1_1, 1);
     if(template_id < 0 || sceHttpSetAutoRedirect(template_id, 0) < 0 ||
        sceHttpSetResolveTimeOut(template_id, URL_DOWNLOAD_TIMEOUT_US) < 0 ||
        sceHttpSetResolveRetry(template_id, 1) < 0 ||
