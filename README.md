@@ -53,6 +53,14 @@ Port **6777** is the normal listening port. A valid `WFM_PORT` environment value
 
 If port 6777 is already in use, the payload does not silently switch to an unknown port. Free the port or deliberately configure a valid `WFM_PORT` override before loading the payload.
 
+### Current runtime verification
+
+The launcher refresh path removes and re-registers only this payload's own title ID before calling the PS5 application-install service. This is required on firmware versions where a repeated `sceAppInstUtilAppInstallAll` call leaves an existing title absent from the Home Screen. The launcher metadata is generated with the port that the HTTP listener reports after binding.
+
+Root discovery keeps the standard PS5 locations and also enumerates actual directory entries below `/mnt`, because USB and extended-storage mount names vary by firmware and device state. Directory listing continues to use `lstat` and the existing absolute-path validation; mount discovery does not weaken traversal or symlink protections.
+
+Host-side regression tests and Linux builds are run in CI and during release preparation. Physical PS5 notification delivery, Home Screen refresh, firmware-specific mount visibility, and long-running hardware stability still require verification on a jailbroken PS5 with the target firmware.
+
 ## PS5 web UI and controller controls
 
 I kept the interface usable from the PS5 browser while preserving the phone and desktop experience. You can browse, choose sources and destinations, convert folders, extract archives, download URLs, review errors, manage outputs, and follow job history from the same UI.
@@ -146,9 +154,9 @@ Cancellation is cooperative. Conversion checks between streamed work units, extr
 | Problem | What to check |
 | --- | --- |
 | The web page does not open | Confirm the PS5 IP address, use `http://PS5-IP:6777/`, and confirm that the startup notification reported a running server. If you explicitly configured `WFM_PORT`, use the configured/bound port instead. |
-| No startup notification appears | Confirm that the new ELF was selected in the payload manager and that port 6777 is not occupied. Check payload-manager logs if they are available. |
-| The Home Screen launcher does not appear | You can still use the web interface through the network URL. Confirm server readiness first. Launcher visibility and installation permissions need verification on physical PS5 hardware. |
-| No files or folders appear | Refresh the UI and inspect the readable roots. Browse only mounted paths that really exist, such as `/data` or `/mnt/usb0` when present. Do not bypass permissions with kernel patches. |
+| No startup notification appears | Confirm that the new ELF was selected in the payload manager and that port 6777 is not occupied. The payload logs the return code if `sceKernelSendNotificationRequest` rejects the request. Check payload-manager logs if they are available. |
+| The Home Screen launcher does not appear | The payload refreshes only its own title registration before installing the launcher metadata. Confirm server readiness first; launcher visibility and installation permissions still need verification on physical PS5 hardware. |
+| No files or folders appear | Refresh the UI and inspect the readable roots. The root API reports existing `/mnt` child directories in addition to standard locations. Browse only mounted paths that really exist. Do not bypass permissions with kernel patches. |
 | Conversion or extraction is rejected | Check the source type, destination existence, write access, free space, output name, and whether a file or folder with that name already exists. |
 | A conversion stopped after a page reload or payload reload | Reloading a payload manager ends the old process, so the original progress bar and in-memory job history disappear. Start the current payload again: it scans `/data/mkpfs-resume`, restores one valid conversion, and shows a new **resuming conversion** job. The UI cannot display work that occurred while the payload was offline. During exFAT creation, recovery continues from the last whole-file checkpoint after validating the unchanged source tree. After the exFAT snapshot is durable, PFSC/PFS work resumes from the private stage without rescanning the source. If recovery reports an invalid checkpoint or source change, start a new conversion from the original source. Temporary files created by older payload versions predate this journal and are not resumable. |
 | A URL download fails | Use a final direct URL without sign-in or redirects, check PS5 network access and free space, then submit a new job. Do not disable HTTPS certificate checks to work around a TLS error. |

@@ -32,6 +32,7 @@
 INCASSET(icon0_png, "assets/icon0.png");
 
 int sceAppInstUtilAppInstallAll(void *);
+int sceAppInstUtilAppUnInstall(const char *);
 
 static int
 install_file(const char *path, const uint8_t *data, size_t size) {
@@ -157,6 +158,10 @@ app_install_if_needed(unsigned short port) {
     printf("sceAppInstUtilInitialize: error 0x%08X\n", err);
     return -1;
   }
+  /* AppInstallAll does not reliably refresh an already registered title on
+   * every PS5 firmware. Remove only this payload's own title, then register
+   * the freshly written metadata below. Unrelated applications are untouched. */
+  (void)sceAppInstUtilAppUnInstall(title_id);
   if(mkdir(base_dir, 0755) && errno != EEXIST) {
     perror("mkdir app dir");
     return -1;

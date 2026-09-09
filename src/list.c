@@ -99,6 +99,8 @@ api_roots(struct MHD_Connection *conn) {
   };
   strbuf_t b = {0};
   int first = 1;
+  DIR *mounts;
+  struct dirent *mount_entry;
 
   strbuf_append(&b, "{\"ok\":true,\"roots\":[");
   for(size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
@@ -113,6 +115,26 @@ api_roots(struct MHD_Connection *conn) {
     if(!first) strbuf_append(&b, ",");
     first = 0;
     json_escape(&b, candidates[i]);
+  }
+  /* USB and extended-storage mount names are firmware/device dependent. Keep
+   * the stable candidates above, then add actual child directories discovered
+   * below /mnt without following symlinks or relaxing path validation. */
+  mounts = opendir("/mnt");
+  if(mounts) {
+    while((mount_entry = readdir(mounts))) {
+      char path[PATH_MAX];
+      struct stat st;
+      if(!strcmp(mount_entry->d_name, ".") ||
+         !strcmp(mount_entry->d_name, "..") ||
+         path_join(path, sizeof(path), "/mnt", mount_entry->d_name) ||
+         lstat(path, &st) || !S_ISDIR(st.st_mode)) {
+        continue;
+      }
+      if(!first) strbuf_append(&b, ",");
+      first = 0;
+      json_escape(&b, path);
+    }
+    closedir(mounts);
   }
   strbuf_append(&b, "]}");
   return send_buffer(conn, MHD_HTTP_OK, b.data, "application/json");
