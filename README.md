@@ -42,20 +42,20 @@ I built this payload to keep the everyday PS5 file workflow in one place: browse
 4. Open the following address from a phone or computer on the same local network:
 
    ```text
-   http://PS5-IP:6777/
+   http://PS5-IP:8888/
    ```
 
    Replace `PS5-IP` with your console's local IP address.
 
 5. On the first run, browse files only. Confirm that the mounted locations you need are readable before starting a conversion, extraction, or download.
 
-Port **6777** is the normal listening port. A valid `WFM_PORT` environment value can deliberately select a different port. If `WFM_PORT` is unset, empty, invalid, or `0`, the payload uses port 6777. The startup notification and managed launcher follow the port that actually bound successfully.
+Port **8888** is the normal listening port. A valid `WFM_PORT` environment value can deliberately select a different starting port. If `WFM_PORT` is unset, empty, invalid, or `0`, the payload uses port 8888. If that port is occupied, the payload advances one port at a time until it binds; the startup notification and managed launcher use the port that actually bound successfully.
 
-If port 6777 is already in use, the payload does not silently switch to an unknown port. Free the port or deliberately configure a valid `WFM_PORT` override before loading the payload.
+If port 8888 is already in use, use the actual port shown in the startup notification.
 
 ### Current runtime verification
 
-The launcher refresh path removes and re-registers only this payload's own title ID before calling the PS5 application-install service. This is required on firmware versions where a repeated `sceAppInstUtilAppInstallAll` call leaves an existing title absent from the Home Screen. The launcher metadata is generated with the port that the HTTP listener reports after binding.
+The listener becomes available before the startup notification is sent. Launcher registration then runs independently, so a slow or failed application-install call cannot prevent browser access. Launcher metadata is generated with the port that the HTTP listener reports after binding.
 
 Root discovery keeps the standard PS5 locations and also enumerates actual directory entries below `/mnt`, because USB and extended-storage mount names vary by firmware and device state. Directory listing continues to use `lstat` and the existing absolute-path validation; mount discovery does not weaken traversal or symlink protections.
 
@@ -153,9 +153,9 @@ Cancellation is cooperative. Conversion checks between streamed work units, extr
 
 | Problem | What to check |
 | --- | --- |
-| The web page does not open | Confirm the PS5 IP address, use `http://PS5-IP:6777/`, and confirm that the startup notification reported a running server. If you explicitly configured `WFM_PORT`, use the configured/bound port instead. |
-| No startup notification appears | Confirm that the new ELF was selected in the payload manager and that port 6777 is not occupied. The payload logs the return code if `sceKernelSendNotificationRequest` rejects the request. Check payload-manager logs if they are available. |
-| The Home Screen launcher does not appear | The payload refreshes only its own title registration before installing the launcher metadata. Confirm server readiness first; launcher visibility and installation permissions still need verification on physical PS5 hardware. |
+| The web page does not open | Confirm the PS5 IP address, use `http://PS5-IP:8888/`, and confirm that the startup notification reported the running port. If port 8888 was occupied or you configured `WFM_PORT`, use the port in that notification. |
+| No startup notification appears | Confirm that the new ELF was selected in the payload manager. The payload logs the return code if `sceKernelSendNotificationRequest` rejects the request. Check payload-manager logs if they are available. |
+| The Home Screen launcher does not appear | Confirm the server first at the notified port. Launcher registration runs after that readiness point; visibility and installation permissions still need verification on physical PS5 hardware. |
 | No files or folders appear | Refresh the UI and inspect the readable roots. The root API reports existing `/mnt` child directories in addition to standard locations. Browse only mounted paths that really exist. Do not bypass permissions with kernel patches. |
 | Conversion or extraction is rejected | Check the source type, destination existence, write access, free space, output name, and whether a file or folder with that name already exists. |
 | A conversion stopped after a page reload or payload reload | Reloading a payload manager ends the old process, so the original progress bar and in-memory job history disappear. Start the current payload again: it scans `/data/mkpfs-resume`, restores one valid conversion, and shows a new **resuming conversion** job. The UI cannot display work that occurred while the payload was offline. During exFAT creation, recovery continues from the last whole-file checkpoint after validating the unchanged source tree. After the exFAT snapshot is durable, PFSC/PFS work resumes from the private stage without rescanning the source. If recovery reports an invalid checkpoint or source change, start a new conversion from the original source. Temporary files created by older payload versions predate this journal and are not resumable. |
@@ -165,7 +165,7 @@ Cancellation is cooperative. Conversion checks between streamed work units, extr
 
 ## Features
 
-- Port **6777**, kept in sync with the startup notification and managed Home Screen launcher.
+- Port **8888** by default, incremented only when occupied and kept in sync with the startup notification and managed Home Screen launcher.
 - PS5 web file browser with explicit source and destination selection.
 - Bounded-memory, deterministic folder-to-`.ffpfsc` conversion.
 - RAR/7z extraction with password input, supported multipart archives, staging, progress, and cooperative cancellation.

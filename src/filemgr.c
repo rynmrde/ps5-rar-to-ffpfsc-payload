@@ -2226,6 +2226,18 @@ archive_progress(unsigned int percent, const char *current, void *opaque) {
   }
 }
 
+static void
+task_worker_release(file_task_t *task) {
+  pthread_mutex_lock(&g_tasks_lock);
+  task->worker_active = 0;
+  pthread_mutex_unlock(&g_tasks_lock);
+}
+
+#define TASK_WORKER_RETURN() do { \
+  task_worker_release(task); \
+  return NULL; \
+} while(0)
+
 void *
 task_worker(void *arg) {
   file_task_t *task = arg;
@@ -2233,6 +2245,9 @@ task_worker(void *arg) {
   unsigned long long required = 0;
   int ret = -1;
 
+  pthread_mutex_lock(&g_tasks_lock);
+  task->worker_active = 1;
+  pthread_mutex_unlock(&g_tasks_lock);
   task_update(task, TASK_RUNNING, "preparing", 0, NULL);
 
   if(task_cancel_requested(task)) {
@@ -2242,7 +2257,7 @@ task_worker(void *arg) {
       remove_conversion_recovery_note(task);
     }
     task_update(task, TASK_CANCELED, task->src, 0, "canceled");
-    return NULL;
+    TASK_WORKER_RETURN();
   }
   if(task->op == TASK_CONVERT) {
     mkpfs_scan_result_t scan;
@@ -2399,7 +2414,7 @@ task_worker(void *arg) {
         task_update(task, TASK_FAILED, task->current[0] ? task->current : task->dst,
                     0, error[0] ? error : strerror(errno));
       }
-      return NULL;
+      TASK_WORKER_RETURN();
     }
   }
   if(task->op == TASK_COPY || task->op == TASK_MOVE) {
@@ -2412,14 +2427,14 @@ task_worker(void *arg) {
       if(task->op == TASK_COPY || task->op == TASK_MOVE) {
         if(task_target_path(task, task->srcs[i], target, sizeof(target))) {
           task_update(task, TASK_FAILED, task->srcs[i], 0, strerror(errno));
-          return NULL;
+          TASK_WORKER_RETURN();
         }
       }
       if(task->op == TASK_MOVE) {
         needs_space = move_requires_space_check(task->srcs[i], target);
         if(needs_space < 0) {
           task_update(task, TASK_FAILED, task->srcs[i], 0, strerror(errno));
-          return NULL;
+          TASK_WORKER_RETURN();
         }
         if(!needs_space) {
           continue;
@@ -2435,7 +2450,7 @@ task_worker(void *arg) {
           }
           task_update(task, TASK_FAILED, task->srcs[i], 0, strerror(errno));
         }
-        return NULL;
+        TASK_WORKER_RETURN();
       }
       if(needs_space) {
         required += total - before;
@@ -2452,7 +2467,7 @@ task_worker(void *arg) {
                             code, sizeof(code), arg, sizeof(arg))) {
         task_set_error_code(task, code, arg);
         task_update(task, TASK_FAILED, task->dst, 0, error[0] ? error : strerror(errno));
-        return NULL;
+        TASK_WORKER_RETURN();
       }
     }
   }
@@ -2570,8 +2585,9 @@ task_worker(void *arg) {
     pthread_mutex_unlock(&g_tasks_lock);
   }
 
-  return NULL;
+  TASK_WORKER_RETURN();
 }
+#undef TASK_WORKER_RETURN
 
 static file_task_t *
 task_from_conversion_journal(const char *path, const conversion_journal_t *journal) {
