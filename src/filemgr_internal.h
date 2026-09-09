@@ -79,6 +79,7 @@ typedef struct file_task {
   atomic_int cancel_requested;
   atomic_int pause_requested;
   int reported; /* Terminal state has been included in /api/tasks. */
+  int worker_active; /* Detached worker still owns this task until it returns. */
   unsigned int active_streams;
   time_t created_at;
   time_t transfer_started_at;

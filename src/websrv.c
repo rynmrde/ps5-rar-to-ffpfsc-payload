@@ -25,6 +25,28 @@
 #define HTTP_CONNECTION_TIMEOUT_SECONDS 120u
 #define HTTP_ACCESS_TOKEN_MAX 64u
 
+static int
+websrv_accept_error_retryable(int error) {
+  switch(error) {
+  case EAGAIN:
+#if EWOULDBLOCK != EAGAIN
+  case EWOULDBLOCK:
+#endif
+  case ECONNABORTED:
+  case ENOBUFS:
+  case ENOMEM:
+  case ENETDOWN:
+  case ENETUNREACH:
+  case EHOSTDOWN:
+  case EHOSTUNREACH:
+  case EPROTO:
+  case EIO:
+    return 1;
+  default:
+    return 0;
+  }
+}
+
 static volatile sig_atomic_t g_stop_requested;
 static int g_listen_fd = -1;
 static char g_access_token[HTTP_ACCESS_TOKEN_MAX + 1];
@@ -368,6 +390,17 @@ websrv_listen(unsigned short port) {
          * exhausted; back off until a browser closes a stale socket. */
         if(!g_stop_requested) {
           fprintf(stderr, "accept temporarily out of file descriptors\n");
+          usleep(100000);
+        }
+        continue;
+      }
+      if(websrv_accept_error_retryable(errno)) {
+        /* NanoDNS keeps its daemon loop alive across recoverable socket
+         * errors.  Do the same here: MHD owns active connections and task
+         * workers must not be stopped merely because one accept failed. */
+        if(!g_stop_requested) {
+          fprintf(stderr, "accept temporarily unavailable: %s\n",
+                  strerror(errno));
           usleep(100000);
         }
         continue;
