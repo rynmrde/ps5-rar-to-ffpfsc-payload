@@ -25,7 +25,13 @@ notify_user(const char *fmt, ...) {
   vsnprintf(req.message, sizeof(req.message), fmt, args);
   va_end(args);
 
-  sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
+  {
+    int result = sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
+    if(result < 0) {
+      fprintf(stderr, "sceKernelSendNotificationRequest failed: 0x%08X\n",
+              (unsigned int)result);
+    }
+  }
 #else
   (void)fmt;
 #endif
