@@ -1012,7 +1012,8 @@ api_url_download(struct MHD_Connection *conn) {
     int blocking_task = 0;
     for(existing = g_tasks; existing; existing = existing->next) {
       if(existing->op == TASK_URL_DOWNLOAD &&
-         (task_is_active(existing) || existing->state == TASK_PAUSED)) {
+         (task_is_active(existing) || existing->state == TASK_PAUSED ||
+          existing->state == TASK_FAILED)) {
         url_tasks++;
       } else if(existing->op != TASK_URL_DOWNLOAD && task_is_active(existing)) {
         blocking_task = 1;
