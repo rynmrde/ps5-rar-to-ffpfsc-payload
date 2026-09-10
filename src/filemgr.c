@@ -786,8 +786,27 @@ done:
     errno = ECANCELED;
     ret = -1;
   }
-  if(!ret && rename(temp, dst)) {
-    ret = -1;
+  if(!ret && task->allow_overwrite) {
+    if(rename(temp, dst)) {
+      ret = -1;
+    }
+  } else if(!ret) {
+    if(link(temp, dst) == 0) {
+      if(unlink(temp)) {
+        ret = -1;
+      }
+    } else if(errno == EOPNOTSUPP || errno == EPERM || errno == EXDEV) {
+      struct stat st;
+      if(lstat(dst, &st) == 0 || errno != ENOENT) {
+        ret = errno == ENOENT ? EEXIST : -errno;
+      } else {
+        if(rename(temp, dst)) {
+          ret = -1;
+        }
+      }
+    } else {
+      ret = -1;
+    }
   }
   if(ret && temp[0]) {
     unlink(temp);
@@ -978,8 +997,27 @@ done:
     errno = ECANCELED;
     ret = -1;
   }
-  if(!ret && rename(temp, dst)) {
-    ret = -1;
+  if(!ret && task->allow_overwrite) {
+    if(rename(temp, dst)) {
+      ret = -1;
+    }
+  } else if(!ret) {
+    if(link(temp, dst) == 0) {
+      if(unlink(temp)) {
+        ret = -1;
+      }
+    } else if(errno == EOPNOTSUPP || errno == EPERM || errno == EXDEV) {
+      struct stat st;
+      if(lstat(dst, &st) == 0 || errno != ENOENT) {
+        ret = errno == ENOENT ? EEXIST : -errno;
+      } else {
+        if(rename(temp, dst)) {
+          ret = -1;
+        }
+      }
+    } else {
+      ret = -1;
+    }
   }
   if(ret && temp[0]) {
     unlink(temp);
@@ -2811,6 +2849,7 @@ create_task_response(struct MHD_Connection *conn, task_op_t op,
   task->state = TASK_QUEUED;
   task->chmod_mode = chmod_mode;
   task->recursive = recursive;
+  task->allow_overwrite = overwrite;
   task->srcs = srcs;
   task->src_count = src_count;
   snprintf(task->src, sizeof(task->src), "%s%s",
@@ -2869,7 +2908,7 @@ api_convert(struct MHD_Connection *conn) {
   char output[PATH_MAX];
   int rc = MHD_HTTP_BAD_REQUEST;
 
-  if (!source || !destination || !name || !relative_path_safe(name) || level > 9 || workers > 8 || (workers_param && strcasecmp(workers_param, "auto") && workers == 0) || stat(source, &source_st) || !S_ISDIR(source_st.st_mode) || stat(destination, &destination_st) || !S_ISDIR(destination_st.st_mode)) {
+  if (!source || !destination || !name || strchr(name, '/') || !relative_path_safe(name) || level > 9 || workers > 8 || (workers_param && strcasecmp(workers_param, "auto") && workers == 0) || stat(source, &source_st) || !S_ISDIR(source_st.st_mode) || stat(destination, &destination_st) || !S_ISDIR(destination_st.st_mode)) {
     rc = MHD_HTTP_BAD_REQUEST; goto convert_error;
   }
   if (snprintf(output, sizeof(output), "%s/%s", destination, name) >= (int)sizeof(output)) { rc = MHD_HTTP_BAD_REQUEST; goto convert_error; }
@@ -3079,6 +3118,11 @@ api_cancel(struct MHD_Connection *conn) {
     }
   }
   pthread_mutex_unlock(&g_tasks_lock);
+  if(found) {
+    pthread_mutex_lock(&g_url_download_lock);
+    pthread_cond_broadcast(&g_url_download_slot);
+    pthread_mutex_unlock(&g_url_download_lock);
+  }
   if(discard_paused) url_download_discard_state(task);
 
   return found ? send_json_ok(conn) :
@@ -3283,6 +3327,13 @@ api_rename(struct MHD_Connection *conn) {
     return send_json_error(conn, MHD_HTTP_BAD_REQUEST, NULL);
   }
 
+  {
+    struct stat rename_st;
+    if(!lstat(target, &rename_st) || errno != ENOENT) {
+      free(path); free(name);
+      return send_json_error(conn, MHD_HTTP_CONFLICT, "file already exists");
+    }
+  }
   ret = rename(path, target);
   free(path); free(name);
   return ret ? send_json_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, NULL)

@@ -13,7 +13,7 @@ ifeq ($(MAKECMDGOALS),)
   endif
 endif
 
-VERSION_TAG := v0.4.5
+VERSION_TAG := v0.4.6
 TITLE_ID    := FMGR88888
 PYTHON      ?= python3
 STRIP       ?= $(PS5_PAYLOAD_SDK)/bin/prospero-strip
@@ -39,12 +39,12 @@ ASSETS      := $(filter-out assets/icon0.png,$(BASE_ASSETS))
 endif
 GEN_SRCS    := $(patsubst assets/%,gen/%, $(ASSETS:=.c))
 
-CFLAGS := -Oz -fno-asynchronous-unwind-tables -fno-unwind-tables -Wall -Werror -ffunction-sections -fdata-sections -Isrc -DVERSION_TAG=\"$(VERSION_TAG)\" -DTITLE_ID=\"$(TITLE_ID)\"
+CFLAGS := -Oz -fno-asynchronous-unwind-tables -fno-unwind-tables -Wall -Werror -ffunction-sections -fdata-sections -Isrc -D_GNU_SOURCE -DVERSION_TAG=\"$(VERSION_TAG)\" -DTITLE_ID=\"$(TITLE_ID)\"
 CFLAGS += `$(PKG_CONFIG) libmicrohttpd --cflags`
 LDFLAGS := -Wl,--gc-sections
 LDADD  := `$(PKG_CONFIG) libmicrohttpd --libs`
 LDADD  += -lSceIpmi -lSceAppInstUtil -lSceUserService -lSceHttp -lz
-LINUX_CFLAGS := -O2 -flto -Wall -Werror -Isrc -DVERSION_TAG=\"$(VERSION_TAG)\" -DTITLE_ID=\"$(TITLE_ID)\"
+LINUX_CFLAGS := -O2 -flto -Wall -Werror -Isrc -D_GNU_SOURCE -DVERSION_TAG=\"$(VERSION_TAG)\" -DTITLE_ID=\"$(TITLE_ID)\"
 LINUX_CFLAGS += `$(HOST_PKG_CONFIG) libmicrohttpd --cflags`
 LINUX_LDADD := `$(HOST_PKG_CONFIG) libmicrohttpd --libs` -pthread -lz -lstdc++
 

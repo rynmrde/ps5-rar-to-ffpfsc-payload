@@ -557,13 +557,14 @@ enum MHD_Result
 api_pkg_icon(struct MHD_Connection *conn) {
   char *path = absolute_path_value(query_value(conn, "path"));
   pkg_source_t pkg = {.fd = -1};
-  unsigned char *icon;
+  unsigned char *icon = NULL;
   struct MHD_Response *response;
   enum MHD_Result ret;
 
   if(!path || pkg_source_open(path, &pkg) || !pkg.icon_size ||
      !(icon = malloc(pkg.icon_size)) ||
      read_at(pkg.fd, icon, pkg.icon_size, pkg.icon_offset)) {
+    free(icon);
     if(path && pkg.fd >= 0) pkg_source_close(&pkg);
     free(path);
     return send_json_error(conn, MHD_HTTP_NOT_FOUND, "package icon not found");

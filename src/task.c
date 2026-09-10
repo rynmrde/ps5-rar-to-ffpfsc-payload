@@ -207,8 +207,8 @@ task_update(file_task_t *task, task_state_t state, const char *current,
       long long elapsed_ns = timespec_delta_ns(&now_mono, &task->speed_sample_time);
       if(elapsed_ns >= 250000000LL) {
         unsigned long long delta = task->done - task->speed_sample_done;
-        task->speed = (unsigned long long)((delta * 1000000000ULL) /
-                                           (unsigned long long)elapsed_ns);
+        task->speed = (unsigned long long)((long double)delta * 1000000000.0L /
+                                           (long double)elapsed_ns);
         task->speed_sample_done = task->done;
         task->speed_sample_time = now_mono;
       }

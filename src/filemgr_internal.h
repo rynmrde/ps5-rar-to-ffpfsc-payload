@@ -67,6 +67,7 @@ typedef struct file_task {
   unsigned int compression_level;
   unsigned int conversion_workers;
   int recursive;
+  int allow_overwrite;
   unsigned long long total;
   unsigned long long done;
   unsigned long long speed;
