@@ -44,6 +44,8 @@ app_register_assets(void) {
   }
 }
 
+static int sync_parent_directory(const char *path);
+
 static int
 install_file(const char *path, const uint8_t *data, size_t size) {
   struct stat st;
@@ -69,7 +71,39 @@ install_file(const char *path, const uint8_t *data, size_t size) {
     unlink(path);
     return -1;
   }
-  return 0;
+  return sync_parent_directory(path);
+}
+
+/* AppInstUtil can inspect the title directory from a separate service thread.
+ * Make an atomic metadata/icon replacement visible and durable before asking
+ * that service to re-register the title. */
+static int
+sync_parent_directory(const char *path) {
+  char parent[PATH_MAX];
+  char *slash;
+  int fd;
+  int error;
+
+  if(strlen(path) >= sizeof(parent)) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+  strcpy(parent, path);
+  slash = strrchr(parent, '/');
+  if(!slash || slash == parent) {
+    errno = EINVAL;
+    return -1;
+  }
+  *slash = 0;
+  fd = open(parent, O_RDONLY | O_DIRECTORY);
+  if(fd < 0) return -1;
+  if(fsync(fd)) {
+    error = errno ? errno : EIO;
+    close(fd);
+    errno = error;
+    return -1;
+  }
+  return close(fd);
 }
 
 static int
@@ -130,7 +164,7 @@ write_owned_param(const char *path, const char *data, size_t size) {
     unlink(tmp);
     return -1;
   }
-  return 0;
+  return sync_parent_directory(path);
 }
 
 static int
@@ -164,7 +198,7 @@ write_owned_binary(const char *path, const uint8_t *data, size_t size) {
     errno = error;
     return -1;
   }
-  return 0;
+  return sync_parent_directory(path);
 }
 
 int
@@ -202,10 +236,6 @@ app_install_if_needed(unsigned short port) {
     printf("sceAppInstUtilInitialize: error 0x%08X\n", err);
     return -1;
   }
-  /* AppInstallAll does not reliably refresh an already registered title on
-   * every PS5 firmware. Remove only this payload's own title, then register
-   * the freshly written metadata below. Unrelated applications are untouched. */
-  (void)sceAppInstUtilAppUnInstall(title_id);
   if(mkdir(base_dir, 0755) && errno != EEXIST) {
     perror("mkdir app dir");
     return -1;
@@ -219,6 +249,12 @@ app_install_if_needed(unsigned short port) {
     perror("install launcher assets");
     return -1;
   }
+  /* AppInstallAll does not reliably refresh an already registered title on
+   * every PS5 firmware. Do not remove our existing title until the replacement
+   * directory has been completely written and synced; otherwise a transient
+   * storage failure turns a refresh into a missing Home Screen launcher.
+   * Only this payload's own title is ever removed. */
+  (void)sceAppInstUtilAppUnInstall(title_id);
   if((err = install_app(title_id, "/user/app/"))) {
     printf("install_app: error 0x%08X\n", err);
     return -1;
