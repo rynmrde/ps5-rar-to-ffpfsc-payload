@@ -3057,8 +3057,13 @@ api_cancel(struct MHD_Connection *conn) {
   pthread_mutex_lock(&g_tasks_lock);
   for(task = g_tasks; task; task = task->next) {
     if(task->id == id && task->op != TASK_PKG_INSTALL &&
-       (task_is_active(task) || task->state == TASK_PAUSED)) {
+       (task_is_active(task) || task->state == TASK_PAUSED || task->state == TASK_FAILED)) {
       atomic_store_explicit(&task->cancel_requested, 1, memory_order_release);
+      if(task->op == TASK_URL_DOWNLOAD && task->state == TASK_FAILED) {
+        task->state = TASK_CANCELED;
+        snprintf(task->error, sizeof(task->error), "cleared");
+        url_download_discard_state(task);
+      }
       if(task->op == TASK_URL_DOWNLOAD && task->state == TASK_PAUSED) {
         task->state = TASK_CANCELED;
         snprintf(task->error, sizeof(task->error), "canceled");
