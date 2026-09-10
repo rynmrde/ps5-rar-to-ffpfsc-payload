@@ -32,10 +32,6 @@ api_list(struct MHD_Connection *conn) {
   strbuf_t b = {0};
   int first = 1;
 
-  if(has_active_task()) {
-    return send_json_error(conn, MHD_HTTP_CONFLICT, "another task is running");
-  }
-
   if(!path) {
     path = strdup("/");
     if(!path) {

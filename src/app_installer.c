@@ -71,7 +71,8 @@ install_file(const char *path, const uint8_t *data, size_t size) {
     unlink(path);
     return -1;
   }
-  return sync_parent_directory(path);
+  if(sync_parent_directory(path)) return -1;
+  return 1;
 }
 
 /* AppInstUtil can inspect the title directory from a separate service thread.
@@ -142,6 +143,7 @@ write_owned_param(const char *path, const char *data, size_t size) {
     errno = EEXIST;
     return -1;
   }
+  if(n == size && !memcmp(current, data, size)) return 0;
   snprintf(tmp, sizeof(tmp), "%s.tmp.XXXXXX", path);
   fd = mkstemp(tmp);
   if(fd < 0) return -1;
@@ -164,7 +166,8 @@ write_owned_param(const char *path, const char *data, size_t size) {
     unlink(tmp);
     return -1;
   }
-  return sync_parent_directory(path);
+  if(sync_parent_directory(path)) return -1;
+  return 1;
 }
 
 static int
@@ -173,12 +176,35 @@ write_owned_binary(const char *path, const uint8_t *data, size_t size) {
   struct stat st;
   FILE *f;
   int fd;
+  int exists;
 
-  if(lstat(path, &st) == 0 && (!S_ISREG(st.st_mode) || st.st_nlink != 1)) {
+  exists = lstat(path, &st) == 0;
+  if(exists && (!S_ISREG(st.st_mode) || st.st_nlink != 1)) {
     errno = EINVAL;
     return -1;
   }
-  if(lstat(path, &st) && errno != ENOENT) return -1;
+  if(!exists && errno != ENOENT) return -1;
+  if(exists && S_ISREG(st.st_mode) && st.st_size == (off_t)size) {
+    FILE *current = fopen(path, "rb");
+    int same = 0;
+    if(current) {
+      uint8_t buffer[4096];
+      size_t offset = 0;
+      same = 1;
+      while(offset < size) {
+        size_t chunk = size - offset;
+        if(chunk > sizeof(buffer)) chunk = sizeof(buffer);
+        if(fread(buffer, 1, chunk, current) != chunk ||
+           memcmp(buffer, data + offset, chunk)) {
+          same = 0;
+          break;
+        }
+        offset += chunk;
+      }
+      fclose(current);
+    }
+    if(same) return 0;
+  }
   if(snprintf(tmp, sizeof(tmp), "%s.tmp.XXXXXX", path) >= (int)sizeof(tmp)) {
     errno = ENAMETOOLONG;
     return -1;
@@ -198,7 +224,8 @@ write_owned_binary(const char *path, const uint8_t *data, size_t size) {
     errno = error;
     return -1;
   }
-  return sync_parent_directory(path);
+  if(sync_parent_directory(path)) return -1;
+  return 1;
 }
 
 int
@@ -244,10 +271,18 @@ app_install_if_needed(unsigned short port) {
     perror("mkdir sce_sys dir");
     return -1;
   }
-  if(write_owned_param(param_path, param_json, strlen(param_json)) ||
-     write_owned_binary(icon_path, icon0_png, icon0_png_size)) {
-    perror("install launcher assets");
-    return -1;
+  {
+    int param_changed = write_owned_param(param_path, param_json, strlen(param_json));
+    int icon_changed = write_owned_binary(icon_path, icon0_png, icon0_png_size);
+    if(param_changed < 0 || icon_changed < 0) {
+      perror("install launcher assets");
+      return -1;
+    }
+    if(!param_changed && !icon_changed) {
+      printf("Launcher app %s is already up to date on port %u\n",
+             title_id, (unsigned int)port);
+      return 0;
+    }
   }
   /* AppInstallAll does not reliably refresh an already registered title on
    * every PS5 firmware. Do not remove our existing title until the replacement
