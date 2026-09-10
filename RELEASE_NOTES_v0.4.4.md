@@ -14,7 +14,7 @@ The MkPFS/FFPFSC conversion format and bounded-memory conversion pipeline were n
 
 ## Verification
 
-Host-side native conversion, archive, downloader, recovery, HTTP, filesystem, and sanitizer checks passed where supported by the available environment. The compatibility test was skipped because `MKPFS_UPSTREAM_ROOT` was not configured. Static analysis completed with pre-existing warnings in `tests/test_mkpfs_resume.c` (side effects in assertions and an fp resource-leak finding); no new source warning was introduced by the v0.4.4 changes.
+Host-side native conversion, archive, downloader, recovery, HTTP, filesystem, sanitizer, Valgrind, static-analysis, and configured upstream MkPFS compatibility checks passed. The resume test was corrected so resource-closing and conversion/checkpoint calls are evaluated outside assertions; `cppcheck` now completes with no findings under the configured warning, performance, and portability checks.
 
 A real PS5 ELF could not be built in this environment because `PS5_PAYLOAD_SDK` and the Prospero toolchain are unavailable. Consequently, no ELF checksum or PS5 release asset is claimed by this source-audit result.
 

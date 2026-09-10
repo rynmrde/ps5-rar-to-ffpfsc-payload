@@ -118,6 +118,7 @@ run_resume_case(const char *source, const char *destination,
   char final_path[PATH_MAX];
   char offline_source[PATH_MAX];
   uint64_t hash;
+  int conversion_result;
 
   options.compression_level = 7;
   options.workers = 1;
@@ -138,9 +139,10 @@ run_resume_case(const char *source, const char *destination,
   snprintf(state.pfs_path, sizeof(state.pfs_path), "%s", stage_pfs);
   interrupted.interrupt_phase = interrupt_phase;
 
-  assert(mkpfs_convert_folder_resumable(source, destination, output, &options,
-                                        NULL, progress_cb, NULL, &state,
-                                        checkpoint_cb, &interrupted) == EIO);
+  conversion_result = mkpfs_convert_folder_resumable(
+    source, destination, output, &options, NULL, progress_cb, NULL, &state,
+    checkpoint_cb, &interrupted);
+  assert(conversion_result == EIO);
   assert(interrupted.interrupted);
   assert(access(final_path, F_OK) != 0);
   if(interrupt_phase == MKPFS_RESUME_EXFAT) {
@@ -168,10 +170,10 @@ run_resume_case(const char *source, const char *destination,
   }
 
   continued.interrupt_phase = 0;
-  assert(mkpfs_convert_folder_resumable(
+  conversion_result = mkpfs_convert_folder_resumable(
     source, destination, output, &options, NULL, progress_cb, NULL,
-    &interrupted.latest, checkpoint_cb, &continued) ==
-    (modify_source_before_resume ? ESTALE : 0));
+    &interrupted.latest, checkpoint_cb, &continued);
+  assert(conversion_result == (modify_source_before_resume ? ESTALE : 0));
   if(modify_source_before_resume) {
     assert(access(final_path, F_OK) != 0);
     assert(access(stage_exfat, F_OK) == 0);
@@ -205,6 +207,7 @@ main(void) {
   char source_file[PATH_MAX];
   char param[PATH_MAX];
   FILE *fp;
+  int close_result;
   mkpfs_native_options_t options = {0};
 
   assert(mkdir(root, 0700) == 0);
@@ -221,7 +224,8 @@ main(void) {
   fp = fopen(param, "wb");
   assert(fp != NULL);
   assert(fputs("{\"titleId\":\"PRESUME01\"}\n", fp) >= 0);
-  assert(fclose(fp) == 0);
+  close_result = fclose(fp);
+  assert(close_result == 0);
   assert(snprintf(source_file, sizeof(source_file), "%s/payload.bin", source) <
          (int)sizeof(source_file));
   write_fixture(source_file);
