@@ -127,6 +127,12 @@ try:
             raise RuntimeError("normal conversion did not publish output")
         if list(output.glob(".*.mkpfs-conversion-*.incomplete")):
             raise RuntimeError("normal conversion left an interrupted-job note")
+        status, body = call("/api/roots", method="POST")
+        if status != 200:
+            raise RuntimeError(f"root discovery status {status}, wanted 200")
+        roots = json.loads(body)["roots"]
+        if len(roots) != len(set(roots)):
+            raise RuntimeError("root discovery returned duplicate paths")
         status, body = call("/api/list?" + urllib.parse.urlencode({"path": str(root / "output")}), method="POST")
         if status != 200 or b'"ok":true' not in body:
             raise RuntimeError("authenticated file browse failed")

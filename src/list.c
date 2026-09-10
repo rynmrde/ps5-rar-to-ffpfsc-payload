@@ -98,6 +98,7 @@ api_roots(struct MHD_Connection *conn) {
     "/mnt/usb7", "/mnt/ext0", "/mnt/ext1"
   };
   strbuf_t b = {0};
+  int candidate_emitted[sizeof(candidates) / sizeof(candidates[0])] = {0};
   int first = 1;
   DIR *mounts;
   struct dirent *mount_entry;
@@ -112,6 +113,7 @@ api_roots(struct MHD_Connection *conn) {
     }
     closedir(dir);
     fprintf(stderr, "api_roots: readable path=%s\n", candidates[i]);
+    candidate_emitted[i] = 1;
     if(!first) strbuf_append(&b, ",");
     first = 0;
     json_escape(&b, candidates[i]);
@@ -124,10 +126,20 @@ api_roots(struct MHD_Connection *conn) {
     while((mount_entry = readdir(mounts))) {
       char path[PATH_MAX];
       struct stat st;
+      int already_emitted = 0;
       if(!strcmp(mount_entry->d_name, ".") ||
          !strcmp(mount_entry->d_name, "..") ||
          path_join(path, sizeof(path), "/mnt", mount_entry->d_name) ||
          lstat(path, &st) || !S_ISDIR(st.st_mode)) {
+        continue;
+      }
+      for(size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        if(candidate_emitted[i] && !strcmp(path, candidates[i])) {
+          already_emitted = 1;
+          break;
+        }
+      }
+      if(already_emitted) {
         continue;
       }
       if(!first) strbuf_append(&b, ",");

@@ -18,9 +18,11 @@
 #include "app_installer.h"
 #include "filemgr.h"
 #include "notify.h"
+#include "process_identity.h"
 #include "websrv.h"
 
 #define PROCESS_NAME "rar-to-ffpfsc-ps5-payload.elf"
+#define SERVICE_PROCESS_NAME "mkpfs-svc-7c91"
 #define DEFAULT_PORT 8888
 
 static unsigned short
@@ -38,9 +40,10 @@ configured_port(void) {
 #ifdef __SCE__
 static pthread_mutex_t g_launcher_install_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/* This is the tested process-replacement behavior from the upstream Web File
- * Manager.  A reload replaces a previous payload instance rather than leaving
- * a stale listener on 8888 and silently moving this instance to a fallback. */
+/* A reload replaces a previous payload instance rather than leaving a stale
+ * listener on 8888 and silently moving this instance to a fallback.  The
+ * exported ki_tdname region is 16 characters plus NUL, so the service token
+ * deliberately fits it and is not the longer ELF/display filename. */
 static pid_t
 find_pid(const char *name) {
   int mib[4] = {1, 14, 8, 0};
@@ -63,19 +66,41 @@ find_pid(const char *name) {
     return -1;
   }
 
-  for(uint8_t *ptr = buf; ptr < buf + buf_size;) {
-    int ki_structsize = *(int *)ptr;
-    pid_t ki_pid = *(pid_t *)&ptr[72];
-    char *ki_tdname = (char *)&ptr[447];
+  for(size_t offset = 0; offset < buf_size;) {
+    pid_t record_pid;
+    size_t record_size;
+    int match = ps5_kinfo_proc_match(buf + offset, buf_size - offset, name,
+                                     &record_pid, &record_size);
 
-    ptr += ki_structsize;
-    if(!strcmp(name, ki_tdname) && ki_pid != mypid) {
-      pid = ki_pid;
+    if(match < 0) {
+      fprintf(stderr, "invalid KERN_PROC record; stale payload cleanup skipped\n");
+      pid = -1;
+      break;
+    }
+    offset += record_size;
+    if(match && record_pid != mypid) {
+      /* The parser returns only an exact match for the dedicated service
+       * token from a complete, validated record. */
+      pid = record_pid;
     }
   }
 
   free(buf);
   return pid;
+}
+
+static int
+retire_stale_payloads(void) {
+  pid_t pid;
+
+  while((pid = find_pid(SERVICE_PROCESS_NAME)) > 0) {
+    if(kill(pid, SIGKILL)) {
+      perror("kill");
+      return -1;
+    }
+    sleep(1);
+  }
+  return 0;
 }
 
 static void *
@@ -120,21 +145,14 @@ main(int argc, char **argv) {
 #ifndef __SCE__
   const char *host_token = getenv("WFM_ACCESS_TOKEN");
 #endif
-#ifdef __SCE__
-  pid_t pid;
-#endif
 
   (void)argc;
   (void)argv;
 
 #ifdef __SCE__
-  syscall(SYS_thr_set_name, -1, PROCESS_NAME);
-  while((pid = find_pid(PROCESS_NAME)) > 0) {
-    if(kill(pid, SIGKILL)) {
-      perror("kill");
-      return 1;
-    }
-    sleep(1);
+  syscall(SYS_thr_set_name, -1, SERVICE_PROCESS_NAME);
+  if(retire_stale_payloads()) {
+    return 1;
   }
 #endif
 

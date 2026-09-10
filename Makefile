@@ -1,4 +1,4 @@
-ifneq ($(filter-out linux linux-deps test-native test-resume test-conversion-recovery test-exfat-recovery test-exfat-source-change test-archive test-url-download test-default-port benchmark-finalization archive-lib mkpfs-pfsc mkpfs-wrap-exfat mkpfs-exfat mkpfs-convert-folder compat-upstream clean,$(MAKECMDGOALS)),)
+ifneq ($(filter-out linux linux-deps test-native test-resume test-process-identity test-conversion-recovery test-exfat-recovery test-exfat-source-change test-archive test-url-download test-default-port benchmark-finalization archive-lib mkpfs-pfsc mkpfs-wrap-exfat mkpfs-exfat mkpfs-convert-folder compat-upstream clean,$(MAKECMDGOALS)),)
   ifdef PS5_PAYLOAD_SDK
     include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
   else
@@ -13,7 +13,7 @@ ifeq ($(MAKECMDGOALS),)
   endif
 endif
 
-VERSION_TAG := v0.3.9
+VERSION_TAG := v0.3.10
 TITLE_ID    := FMGR88888
 PYTHON      ?= python3
 STRIP       ?= $(PS5_PAYLOAD_SDK)/bin/prospero-strip
@@ -26,7 +26,7 @@ HOST_PKG_CONFIG ?= pkg-config
 BIN        := rar-to-ffpfsc-ps5-payload.elf
 LEGACY_BIN := web-file-mgr.elf
 LINUX_BIN  := web-file-mgr-linux
-COMMON_SRCS := src/main.c src/websrv.c src/filemgr.c src/file_response.c src/task.c src/upload.c src/download.c src/url_download.c src/text.c src/list.c src/space.c src/fs_util.c src/json_util.c src/path_util.c src/asset.c src/mime.c src/notify.c src/pkg_installer.c src/pkg_info.c src/mkpfs_native.c
+COMMON_SRCS := src/main.c src/websrv.c src/filemgr.c src/file_response.c src/task.c src/upload.c src/download.c src/url_download.c src/text.c src/list.c src/space.c src/fs_util.c src/json_util.c src/path_util.c src/asset.c src/mime.c src/notify.c src/pkg_installer.c src/pkg_info.c src/mkpfs_native.c src/process_identity.c
 PS5_SRCS    := $(COMMON_SRCS) src/app_installer.c
 LINUX_SRCS  := $(COMMON_SRCS)
 ARCHIVE_DIR := third_party/unrar-ps5
@@ -48,7 +48,7 @@ LINUX_CFLAGS := -O2 -flto -Wall -Werror -Isrc -DVERSION_TAG=\"$(VERSION_TAG)\" -
 LINUX_CFLAGS += `$(HOST_PKG_CONFIG) libmicrohttpd --cflags`
 LINUX_LDADD := `$(HOST_PKG_CONFIG) libmicrohttpd --libs` -pthread -lz -lstdc++
 
-.PHONY: all linux test-native test-resume test-conversion-recovery test-exfat-recovery test-exfat-source-change test-archive test-url-download test-default-port benchmark-finalization mkpfs-pfsc mkpfs-wrap-exfat mkpfs-exfat mkpfs-convert-folder compat-upstream deps linux-deps archive-lib clean
+.PHONY: all linux test-native test-resume test-process-identity test-conversion-recovery test-exfat-recovery test-exfat-source-change test-archive test-url-download test-default-port benchmark-finalization mkpfs-pfsc mkpfs-wrap-exfat mkpfs-exfat mkpfs-convert-folder compat-upstream deps linux-deps archive-lib clean
 
 all: deps $(BIN)
 
@@ -63,6 +63,9 @@ test-native: tests/test_mkpfs_native
 
 test-resume: tests/test_mkpfs_resume
 	./tests/test_mkpfs_resume
+
+test-process-identity: tests/test_process_identity
+	./tests/test_process_identity
 
 test-conversion-recovery: linux
 	./tools/test_conversion_restart_recovery.sh
@@ -105,7 +108,7 @@ gen:
 
 clean:
 	$(MAKE) -C $(ARCHIVE_DIR) clean
-	rm -rf $(BIN) $(LEGACY_BIN) $(LINUX_BIN) tests/test_mkpfs_native tests/test_mkpfs_resume tests/test_archive_extract tools/mkpfs-pfsc tools/mkpfs-wrap-exfat tools/mkpfs-exfat tools/mkpfs-convert-folder gen
+	rm -rf $(BIN) $(LEGACY_BIN) $(LINUX_BIN) tests/test_mkpfs_native tests/test_mkpfs_resume tests/test_process_identity tests/test_archive_extract tools/mkpfs-pfsc tools/mkpfs-wrap-exfat tools/mkpfs-exfat tools/mkpfs-convert-folder gen
 
 gen/%.c: assets/% gen-asset-module.py | gen
 	$(PYTHON) gen-asset-module.py --path $* $< > $@
@@ -123,6 +126,9 @@ tests/test_mkpfs_native: tests/test_mkpfs_native.c src/mkpfs_native.c src/mkpfs_
 
 tests/test_mkpfs_resume: tests/test_mkpfs_resume.c src/mkpfs_native.c src/mkpfs_native.h
 	$(HOST_CC) -O2 -Wall -Werror -Isrc -o $@ tests/test_mkpfs_resume.c src/mkpfs_native.c -lz -pthread
+
+tests/test_process_identity: tests/test_process_identity.c src/process_identity.c src/process_identity.h
+	$(HOST_CC) -O2 -Wall -Werror -Isrc -o $@ tests/test_process_identity.c src/process_identity.c
 
 tests/test_archive_extract: archive-lib tests/test_archive_extract.c src/archive_extract.h
 	$(HOST_CC) -O2 -Wall -Werror -Isrc -o $@ tests/test_archive_extract.c -Wl,--whole-archive $(ARCHIVE_LIB) -Wl,--no-whole-archive -pthread -lstdc++
