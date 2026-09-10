@@ -1,0 +1,521 @@
+AUDIT_REPORT_v0.4.5
+========================
+
+This report is generated from the repository source checked at audit time. It records exact snippets copied from the working tree and explicit results for every requested checklist item.
+
+1. REPOSITORY STATE
+----------------------
+PASS: HEAD = b843e60a7cfc6f4b930b81bc94ef1285aa4a37e0
+PASS: origin/main = b843e60a7cfc6f4b930b81bc94ef1285aa4a37e0
+PASS: v0.4.5 peeled commit = b843e60a7cfc6f4b930b81bc94ef1285aa4a37e0
+PASS: main, origin/main, and v0.4.5 point to the same commit at audit time.
+PASS: RELEASE_NOTES_v0.4.5.md exists.
+Current version declaration:
+```
+   8: ifeq ($(MAKECMDGOALS),)
+   9:   ifdef PS5_PAYLOAD_SDK
+  10:     include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
+  11:   else
+  12:     $(error PS5_PAYLOAD_SDK is undefined)
+  13:   endif
+  14: endif
+  15: 
+  16: VERSION_TAG := v0.4.5
+  17: TITLE_ID    := FMGR88888
+  18: PYTHON      ?= python3
+  19: STRIP       ?= $(PS5_PAYLOAD_SDK)/bin/prospero-strip
+  20: PKG_CONFIG  ?= $(PS5_PAYLOAD_SDK)/bin/prospero-pkg-config
+  21: HOST_CC     = cc
+  22: HOST_CXX    = c++
+  23: HOST_STRIP  ?= strip
+  24: HOST_PKG_CONFIG ?= pkg-config
+```
+
+2. DOWNLOADER QUEUE STARVATION FIX
+------------------------------------
+PASS: 1.1 api_url_download queue counter excludes TASK_FAILED.
+Exact queue code found:
+```c
+1009:   {
+1010:     file_task_t *existing;
+1011:     unsigned int url_tasks = 0;
+1012:     int blocking_task = 0;
+1013:     for(existing = g_tasks; existing; existing = existing->next) {
+1014:       if(existing->op == TASK_URL_DOWNLOAD &&
+1015:          (task_is_active(existing) || existing->state == TASK_PAUSED)) {
+1016:         url_tasks++;
+1017:       } else if(existing->op != TASK_URL_DOWNLOAD && task_is_active(existing)) {
+1018:         blocking_task = 1;
+1019:       }
+```
+PASS: 1.2 api_cancel accepts TASK_FAILED and clears failed URL downloads.
+Exact cancel code found:
+```c
+3053:   int found = 0;
+3054:   int discard_paused = 0;
+3055: 
+3056:   free(idstr);
+3057:   pthread_mutex_lock(&g_tasks_lock);
+3058:   for(task = g_tasks; task; task = task->next) {
+3059:     if(task->id == id && task->op != TASK_PKG_INSTALL &&
+3060:        (task_is_active(task) || task->state == TASK_PAUSED || task->state == TASK_FAILED)) {
+3061:       atomic_store_explicit(&task->cancel_requested, 1, memory_order_release);
+3062:       if(task->op == TASK_URL_DOWNLOAD && task->state == TASK_FAILED) {
+3063:         task->state = TASK_CANCELED;
+3064:         snprintf(task->error, sizeof(task->error), "cleared");
+3065:         url_download_discard_state(task);
+3066:       }
+3067:       if(task->op == TASK_URL_DOWNLOAD && task->state == TASK_PAUSED) {
+```
+PASS: 1.3 remove_finished_tasks_locked retains failed tasks for retry/history according to its terminal-state condition.
+Exact function:
+```c
+remove_finished_tasks_locked(void) {
+  file_task_t **link = &g_tasks;
+
+  while(*link) {
+    file_task_t *task = *link;
+
+    if(task_is_active(task) || task->state == TASK_PAUSED || task->worker_active ||
+       (task->op == TASK_URL_DOWNLOAD && task->state == TASK_FAILED) ||
+       task->active_streams ||
+       (task->op == TASK_PKG_INSTALL && !task->reported)) {
+      link = &task->next;
+      continue;
+    }
+
+    *link = task->next;
+    free_task(task);
+  }
+}
+```
+Issues: no additional queue-state issue found in these audited paths.
+
+3. API LIST UNBLOCKED
+------------------------
+PASS: 2.1 api_list contains no active-task global blocking check.
+First 10 lines of api_list():
+```c
+api_list(struct MHD_Connection *conn) {
+  char *path = absolute_path_value(query_value(conn, "path"));
+  DIR *dir;
+  struct dirent *entry;
+  struct stat st;
+  strbuf_t b = {0};
+  int first = 1;
+
+  if(!path) {
+    path = strdup("/");
+```
+
+4. LAUNCHER IDEMPOTENCE
+---------------------------
+PASS: 3.1 app_installer contains content comparison and conditional reinstall logic.
+Relevant exact code:
+```c
+ 104:     errno = error;
+ 105:     return -1;
+ 106:   }
+ 107:   return close(fd);
+ 108: }
+ 109: 
+ 110: static int
+ 111: install_app(const char *title_id, const char *dir) {
+ 112:   int (*sceAppInstUtilAppInstallTitleDir)(const char *, const char *, void *) = 0;
+ 113:   const char *nid = "Wudg3Xe3heE";
+ 114:   uint32_t handle;
+ 115: 
+ 116:   if(!kernel_dynlib_handle(-1, "libSceAppInstUtil.sprx", &handle)) {
+ 117:     sceAppInstUtilAppInstallTitleDir =
+ 118:       (void *)kernel_dynlib_resolve(-1, handle, nid);
+ 119:   }
+ 120: 
+ 121:   if(sceAppInstUtilAppInstallTitleDir) {
+ 122:     return sceAppInstUtilAppInstallTitleDir(title_id, dir, 0);
+ 123:   }
+ 124: 
+ 125:   return sceAppInstUtilAppInstallAll(0);
+ 126: }
+ 127: 
+ 128: static int
+ 129: write_owned_param(const char *path, const char *data, size_t size) {
+ 130:   char current[1024];
+ 131:   char tmp[PATH_MAX];
+ 132:   FILE *f = fopen(path, "rb");
+ 133:   int fd;
+ 134:   size_t n;
+ 135: 
+ 136:   if(!f) {
+ 137:     return errno == ENOENT ? install_file(path, (const uint8_t *)data, size) : -1;
+ 138:   }
+ 139:   n = fread(current, 1, sizeof(current) - 1, f);
+ 140:   fclose(f);
+ 141:   current[n] = 0;
+ 142:   if(!strstr(current, "\"titleId\": \"FMGR88888\"")) {
+ 143:     errno = EEXIST;
+ 144:     return -1;
+ 145:   }
+ 146:   if(n == size && !memcmp(current, data, size)) return 0;
+ 147:   snprintf(tmp, sizeof(tmp), "%s.tmp.XXXXXX", path);
+ 148:   fd = mkstemp(tmp);
+ 149:   if(fd < 0) return -1;
+ 150:   f = fdopen(fd, "wb");
+ 151:   if(!f) {
+ 152:     close(fd);
+ 153:     unlink(tmp);
+ 154:     return -1;
+```
+Issues: no new issue found in the audited installer implementation; physical PS5 registration remains unverified.
+
+5. CONVERSION PIPELINE
+-------------------------
+PASS: 4.1 conversion code contains atomic publication, resumable checkpoints, and stream-oriented PFSC processing.
+exfat_write_folder signature and first 5 lines:
+```c
+exfat_write_folder(const char *source, const char *output,
+                   const atomic_int *cancel_requested,
+                   mkpfs_progress_callback progress, void *opaque,
+                   uint64_t *image_size, mkpfs_resume_state_t *resume,
+                   mkpfs_resume_checkpoint_callback checkpoint,
+                   void *checkpoint_opaque) {
+```
+mkpfs_convert_folder_resumable signature and first 5 lines:
+```c
+mkpfs_convert_folder_resumable(
+  const char *source, const char *destination, const char *output_name,
+  const mkpfs_native_options_t *options, const atomic_int *cancel_requested,
+  mkpfs_progress_callback progress, void *progress_opaque,
+  mkpfs_resume_state_t *resume,
+  mkpfs_resume_checkpoint_callback checkpoint, void *checkpoint_opaque) {
+```
+Evidence blocks:
+```c
+  20: #define PFSC_UNK4 0
+  21: #define PFSC_UNK8 6
+  22: #define PFSC_BLOCK_SIZE 0x10000u
+  23: #define PFSC_HEADER_SIZE 0x30u
+  24: #define PFSC_OFFSETS_OFFSET 0x400u
+  25: #define PFSC_INITIAL_DATA_OFFSET 0x10000u
+  26: #define PFSC_MAX_OFFSETS_BYTES (64u * 1024u * 1024u)
+  27: #define PFSC_PROGRESS_INTERVAL (4u * 1024u * 1024u)
+  28: #define PFSC_OFFSET_WRITE_ENTRIES 8192u
+  29: #define PFSC_VERIFY_OFFSET_WINDOW 4096u
+  30: #define EXFAT_MAX_TREE_NODES 262144u
+  31: #define EXFAT_MAX_TREE_DEPTH 128u
+  32: /* A checkpoint is made only after complete file records are durable.  This
+  33:  * bounds rework after a payload restart without forcing an fsync per file. */
+  34: #define EXFAT_CHECKPOINT_BYTES (128u * 1024u * 1024u)
+  35: #define EXFAT_CHECKPOINT_FILES 4096u
+  36: 
+  37: static int cancellation_requested(const atomic_int *cancel_requested) {
+  38:   return cancel_requested && atomic_load_explicit(cancel_requested,
+  39:                                                    memory_order_acquire);
+  40: }
+  41: 
+  42: static uint64_t align_up_u64(uint64_t value, uint64_t alignment) {
+  43:   return (value + alignment - 1) / alignment * alignment;
+  44: }
+```
+Issues: no format or architecture change found.
+
+6. TASK LIFECYCLE
+----------------------
+PASS: 5.1 task_update locks g_tasks_lock before field mutation.
+PASS: 5.1 task_cancel_requested uses acquire atomic load.
+task_update body:
+```c
+task_update(file_task_t *task, task_state_t state, const char *current,
+            unsigned long long add_done, const char *error) {
+  struct timespec now_mono;
+  time_t now;
+
+  clock_gettime(CLOCK_MONOTONIC, &now_mono);
+  now = time(NULL);
+
+  pthread_mutex_lock(&g_tasks_lock);
+  task->state = state;
+  if(current) {
+    snprintf(task->current, sizeof(task->current), "%s", current);
+  }
+  if(add_done) {
+    if(!task->transfer_started_at) {
+      task->transfer_started_at = now;
+    }
+    task->done += add_done;
+    if(task->total && task->done > task->total) {
+      task->done = task->total;
+    }
+    if(task->speed_sample_time.tv_sec) {
+      long long elapsed_ns = timespec_delta_ns(&now_mono, &task->speed_sample_time);
+      if(elapsed_ns >= 250000000LL) {
+        unsigned long long delta = task->done - task->speed_sample_done;
+        task->speed = (unsigned long long)((delta * 1000000000ULL) /
+                                           (unsigned long long)elapsed_ns);
+        task->speed_sample_done = task->done;
+        task->speed_sample_time = now_mono;
+      }
+    } else {
+      task->speed_sample_done = task->done;
+      task->speed_sample_time = now_mono;
+    }
+    task_update_eta_locked(task, &now_mono);
+  }
+  if(error) {
+    snprintf(task->error, sizeof(task->error), "%s", error);
+  }
+  task->updated_at = now;
+  pthread_mutex_unlock(&g_tasks_lock);
+}
+```
+task_cancel_requested body:
+```c
+int
+task_cancel_requested(file_task_t *task) {
+  int cancel;
+  pthread_mutex_lock(&g_tasks_lock);
+  cancel = atomic_load_explicit(&task->cancel_requested, memory_order_acquire);
+  pthread_mutex_unlock(&g_tasks_lock);
+  if(cancel) {
+    errno = ECANCELED;
+  }
+  return cancel;
+}
+```
+PASS: 5.2 task_worker tracks worker_active and uses TASK_WORKER_RETURN cleanup.
+task_worker beginning and end:
+```c
+void *
+task_worker(void *arg) {
+  file_task_t *task = arg;
+  unsigned long long total = 0;
+  unsigned long long required = 0;
+  int ret = -1;
+  int download_slot = 0;
+  pthread_mutex_lock(&g_tasks_lock);
+  task->worker_active = 1;
+  pthread_mutex_unlock(&g_tasks_lock);
+  ...
+  TASK_WORKER_RETURN();
+#undef TASK_WORKER_RETURN
+}
+```
+
+7. SECURITY CHECKS
+----------------------
+PASS: 6.1 relative_path_safe rejects absolute paths, dot, and dot-dot components.
+PASS: 6.1 path_join validates name with relative_path_safe.
+relative_path_safe body:
+```c
+relative_path_safe(const char *path) {
+  const char *p = path;
+
+  if(!path || !path[0] || path[0] == '/') {
+    errno = EINVAL;
+    return 0;
+  }
+  while(*p) {
+    const char *start = p;
+    size_t len;
+
+    while(*p && *p != '/') {
+      if(*p == '\\') {
+        errno = EINVAL;
+        return 0;
+      }
+      p++;
+    }
+    len = (size_t)(p - start);
+    if(!len || (len == 1 && start[0] == '.') ||
+       (len == 2 && start[0] == '.' && start[1] == '.')) {
+      errno = EINVAL;
+      return 0;
+    }
+    if(*p == '/') {
+      p++;
+    }
+  }
+  return 1;
+}
+```
+path_join body:
+```c
+path_join(char *out, size_t size, const char *dir, const char *name) {
+  int n;
+  if(!dir || !name || !dir[0] || !name[0] || !relative_path_safe(name)) {
+    errno = EINVAL;
+    return -1;
+  }
+  n = snprintf(out, size, "%s%s%s", dir,
+               (strcmp(dir, "/") && dir[strlen(dir) - 1] != '/') ? "/" : "",
+               name);
+  if(n < 0 || (size_t)n >= size) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+  return 0;
+}
+```
+PASS: 6.2 api_roots uses lstat for mount discovery.
+api_roots mount enumeration:
+```c
+  /* USB and extended-storage mount names are firmware/device dependent. Keep
+   * the stable candidates above, then add actual child directories discovered
+   * below /mnt without following symlinks or relaxing path validation. */
+  mounts = opendir("/mnt");
+  if(mounts) {
+    while((mount_entry = readdir(mounts))) {
+      char path[PATH_MAX];
+      struct stat st;
+      if(!strcmp(mount_entry->d_name, ".") ||
+         !strcmp(mount_entry->d_name, "..") ||
+         path_join(path, sizeof(path), "/mnt", mount_entry->d_name) ||
+         lstat(path, &st) || !S_ISDIR(st.st_mode)) {
+        continue;
+      }
+      if(!first) strbuf_append(&b, ",");
+      first = 0;
+      json_escape(&b, path);
+    }
+    closedir(mounts);
+  }
+```
+Issues: no new source-level traversal/symlink issue found.
+
+8. VERSION CONSISTENCY
+---------------------------
+PASS: 7.1 release notes mention queue starvation fix.
+PASS: 7.2 v0.4.5 tag points to current main HEAD at audit time.
+7.3 VERSION_TAG evidence:
+```
+   8: ifeq ($(MAKECMDGOALS),)
+   9:   ifdef PS5_PAYLOAD_SDK
+  10:     include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
+  11:   else
+  12:     $(error PS5_PAYLOAD_SDK is undefined)
+  13:   endif
+  14: endif
+  15: 
+  16: VERSION_TAG := v0.4.5
+  17: TITLE_ID    := FMGR88888
+  18: PYTHON      ?= python3
+  19: STRIP       ?= $(PS5_PAYLOAD_SDK)/bin/prospero-strip
+  20: PKG_CONFIG  ?= $(PS5_PAYLOAD_SDK)/bin/prospero-pkg-config
+  21: HOST_CC     = cc
+  22: HOST_CXX    = c++
+  23: HOST_STRIP  ?= strip
+  24: HOST_PKG_CONFIG ?= pkg-config
+```
+PASS: canonical Makefile VERSION_TAG is v0.4.5.
+7.4 SHA256 files found:
+```
+SHA256SUMS-v0.4.3.txt
+SHA256SUMS-v0.4.4.txt
+SHA256SUMS-v0.4.5.txt
+```
+
+9. TEST HARNESS
+---------------------
+PASS: 8.1 tests directory exists.
+8.2 Test files:
+```
+tests/test_archive_extract.c
+tests/test_archive_extract.sh
+tests/test_folder_compat.sh
+tests/test_mkpfs_native.c
+tests/test_mkpfs_resume.c
+tests/url_download_fixture_server.py
+```
+PASS: 8.3 at least one test mentions queue/failed/starvation.
+8.4 CI workflow:
+```yaml
+name: Linux tests
+on:
+  push:
+  pull_request:
+jobs:
+  native-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install libmicrohttpd headers
+        run: sudo apt-get update && sudo apt-get install -y libmicrohttpd-dev
+      - name: Run native regression tests
+        run: make test-native
+
+```
+
+10. REGRESSION CHECK
+-----------------------
+PASS: 9.1 journal magic exists.
+PASS: 9.1 interrupted-download resume function exists.
+PASS: 9.2 checkpoint byte threshold exists.
+PASS: 9.3 pause/resume logic exists.
+PASS: 9.4 Makefile builds third_party/unrar-ps5 archive library.
+
+11. NEW BUGS / CONCERNS
+----------------------------
+PASS: 10.3 no TODO/FIXME/HACK unfinished-work markers found in audited source/test/tool paths.
+Static allocation/race/error-path assessment: PASS with scope limitation. The available host ASan/UBSan, Valgrind, cppcheck, recovery, concurrency, and HTTP suites previously completed successfully; this source audit found no new obvious unmatched allocation or unlocked shared-state mutation in the requested paths. This is not a formal proof of absence.
+Potential concerns:
+```
+None found by marker scan.
+```
+
+12. FINAL VERDICT
+-------------------
+PASS: COMPLETE: all checklist assertions that are mechanically verifiable from the repository pass. Corrected report pattern matching now records the exact function evidence for task cancellation, task_worker, and relative path validation.
+Physical PS5 runtime limitations remain: no simulator was found for PS5 system services, launcher registration, notifications, Home Screen refresh, physical mounts, controller behavior, firmware behavior, or long-duration hardware stability.
+
+13. FILES CHECKED
+--------------------
+```
+src/app_installer.c
+src/app_installer.h
+src/archive_extract.h
+src/asset.c
+src/asset.h
+src/download.c
+src/exfat_upcase.h
+src/file_response.c
+src/filemgr.c
+src/filemgr.h
+src/filemgr_internal.h
+src/fs_util.c
+src/json_util.c
+src/json_util.h
+src/list.c
+src/main.c
+src/mime.c
+src/mime.h
+src/mkpfs_native.c
+src/mkpfs_native.h
+src/notify.c
+src/notify.h
+src/path_util.c
+src/path_util.h
+src/pkg_info.c
+src/pkg_info.h
+src/pkg_installer.c
+src/pkg_installer.h
+src/space.c
+src/task.c
+src/text.c
+src/upload.c
+src/url_download.c
+src/websrv.c
+src/websrv.h
+tests/test_archive_extract.c
+tests/test_archive_extract.sh
+tests/test_folder_compat.sh
+tests/test_mkpfs_native.c
+tests/test_mkpfs_resume.c
+tests/url_download_fixture_server.py
+Makefile
+RELEASE_NOTES_v0.4.5.md
+.github/workflows/linux-tests.yml
+SHA256SUMS-v0.4.3.txt
+SHA256SUMS-v0.4.4.txt
+SHA256SUMS-v0.4.5.txt
+```
+
+END OF AUDIT REPORT
