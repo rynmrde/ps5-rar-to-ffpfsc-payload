@@ -523,7 +523,22 @@ filemgr_upload_finish(struct MHD_Connection *conn, void *upload_ctx) {
       goto done;
     }
   } else {
-    if(link(ctx->temp, ctx->target) || unlink(ctx->temp)) {
+    if(link(ctx->temp, ctx->target) == 0) {
+      if(unlink(ctx->temp)) {
+        ctx->error = errno;
+        goto done;
+      }
+    } else if(errno == EOPNOTSUPP || errno == EPERM || errno == EXDEV) {
+      struct stat publish_st;
+      if(lstat(ctx->target, &publish_st) == 0 || errno != ENOENT) {
+        ctx->error = errno == ENOENT ? EEXIST : errno;
+        goto done;
+      }
+      if(rename(ctx->temp, ctx->target)) {
+        ctx->error = errno;
+        goto done;
+      }
+    } else {
       ctx->error = errno;
       goto done;
     }

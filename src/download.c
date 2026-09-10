@@ -124,6 +124,10 @@ tar_queue_header(tar_stream_t *s, const char *name, const struct stat *st,
   if(tar_split_name(name, tar_name, sizeof(tar_name), prefix, sizeof(prefix))) {
     return -1;
   }
+  if(size > 077777777777ULL) {
+    errno = EFBIG;
+    return -1;
+  }
   memset(header, 0, sizeof(header));
   memcpy(header, tar_name, strlen(tar_name));
   snprintf(header + 100, 8, "%07o", mode);

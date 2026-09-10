@@ -1722,14 +1722,25 @@ remove_private_stage(const char *path) {
 }
 
 static int
+static int
 publish_stage_no_replace(const char *stage_path, const char *output_path) {
-  if(link(stage_path, output_path) != 0) return errno;
-  if(unlink(stage_path) != 0) {
-    int error = errno;
-    unlink(output_path);
-    return error;
+  if(link(stage_path, output_path) == 0) {
+    if(unlink(stage_path) != 0) {
+      int error = errno;
+      unlink(output_path);
+      return error;
+    }
+    return 0;
   }
-  return 0;
+  if(errno == EOPNOTSUPP || errno == EPERM || errno == EXDEV) {
+    struct stat st;
+    if(lstat(output_path, &st) == 0 || errno != ENOENT) {
+      return errno == ENOENT ? EEXIST : errno;
+    }
+    if(rename(stage_path, output_path) != 0) return errno;
+    return 0;
+  }
+  return errno;
 }
 
 int
