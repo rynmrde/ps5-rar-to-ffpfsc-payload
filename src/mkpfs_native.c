@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include "mkpfs_native.h"
 #include "exfat_upcase.h"
 
@@ -1721,7 +1720,6 @@ remove_private_stage(const char *path) {
   return unlink(path) == 0 ? 0 : errno;
 }
 
-static int
 static int
 publish_stage_no_replace(const char *stage_path, const char *output_path) {
   if(link(stage_path, output_path) == 0) {

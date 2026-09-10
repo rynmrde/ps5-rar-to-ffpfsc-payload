@@ -1,8 +1,1 @@
-# SHA-256 checksums for v0.4.6 release
-# This file should be regenerated after building the PS5 ELF:
-#   make clean && make all
-# Then run:
-#   sha256sum rar-to-ffpfsc-ps5-payload.elf > SHA256SUMS-v0.4.6.txt
-
-# Placeholder - replace with actual checksum after build:
-# <actual-sha256>  rar-to-ffpfsc-ps5-payload.elf
+9c5b7810a13e580c2f1e74a606b9ffa2a7ad99499632914d407bcd5cd57067c7  rar-to-ffpfsc-ps5-payload.elf
