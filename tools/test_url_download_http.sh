@@ -142,6 +142,22 @@ assert Path(sys.argv[1]).read_bytes() == bytes(range(256)) * 65536
 PY
 ! find "$root/journals" -type f -name 'mkpfs-download-*.resume' -print | grep -q .
 
+# A resumed request must restart safely if the server ignores Range and returns
+# the complete payload with HTTP 200 instead of HTTP 206.
+response=$(api_post "$base?url=http%3A%2F%2F127.0.0.1%3A$fixture_port%2Fignore-range.bin&destination=$destination&name=ignore-range.bin")
+id=$(task_id_from "$response")
+[ -n "$id" ]
+sleep 0.2
+api_post "http://127.0.0.1:$server_port/api/download/pause?id=$id" >/dev/null
+wait_for_state "$id" paused
+api_post "http://127.0.0.1:$server_port/api/download/resume?id=$id" >/dev/null
+wait_for_state "$id" done
+python3 - "$root/destination/ignore-range.bin" <<'PY'
+from pathlib import Path
+import sys
+assert Path(sys.argv[1]).read_bytes() == bytes(range(256)) * 65536
+PY
+
 # Three slow jobs demonstrate the two-worker bound plus a visible queued job.
 queue_ids=''
 for name in queue-one.bin queue-two.bin queue-three.bin; do

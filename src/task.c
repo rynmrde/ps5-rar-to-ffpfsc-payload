@@ -83,12 +83,16 @@ free_task(file_task_t *task) {
 void
 remove_finished_tasks_locked(void) {
   file_task_t **link = &g_tasks;
+  time_t now = time(NULL);
 
   while(*link) {
     file_task_t *task = *link;
 
     if(task_is_active(task) || task->state == TASK_PAUSED || task->worker_active ||
-       (task->op == TASK_URL_DOWNLOAD && task->state == TASK_FAILED) ||
+       ((task->state == TASK_DONE || task->state == TASK_FAILED ||
+         task->state == TASK_CANCELED) &&
+        task->updated_at && now >= task->updated_at &&
+        now - task->updated_at < 60) ||
        task->active_streams ||
        (task->op == TASK_PKG_INSTALL && !task->reported)) {
       link = &task->next;

@@ -350,6 +350,7 @@ parse_remote_url(const char *text, remote_url_t *out) {
 #ifndef __SCE__
 typedef struct host_http_client {
   int fd;
+  int status_code;
   unsigned long long content_length;
   unsigned long long body_remaining;
   char pending[8192];
@@ -455,13 +456,15 @@ host_http_open(const char *text, const remote_url_t *url,
       char *line;
       size_t header_bytes = (size_t)(headers_end + 4 - client->pending);
       if(sscanf(client->pending, "HTTP/%*u.%*u %d", &status) != 1 ||
-         status < 200 || status >= 300 || (resume_at && status != 206) ||
+         status < 200 || status >= 300 ||
+         (resume_at && status != 206 && status != 200) ||
          (!resume_at && status != 200)) {
         snprintf(error, error_size, "HTTP status %d", status);
         errno = EIO;
         host_http_close(client);
         return -1;
       }
+      client->status_code = status;
       line = strstr(client->pending, "\r\n");
       while(line && line < headers_end) {
         char *value;
@@ -498,7 +501,8 @@ host_http_open(const char *text, const remote_url_t *url,
       client->pending_offset = header_bytes;
       client->pending_size = used;
       client->body_remaining = saw_length ? client->content_length : ULLONG_MAX;
-      *content_length = saw_length ? client->content_length + resume_at : 0;
+      *content_length = saw_length ? client->content_length +
+        (status == 206 ? resume_at : 0) : 0;
       return 0;
     }
   }
@@ -696,9 +700,25 @@ url_download_task_run(file_task_t *task) {
       goto sce_done;
     }
     if(status_code < 200 || status_code >= 300 ||
-       (resume_at && status_code != 206) || (!resume_at && status_code != 200)) {
+       (resume_at && status_code != 206 && status_code != 200) ||
+       (!resume_at && status_code != 200)) {
       snprintf(error, sizeof(error), "HTTP status %d", status_code);
       goto sce_done;
+    }
+    if(status_code == 200 && resume_at) {
+      if(ftruncate(fd, 0) || lseek(fd, 0, SEEK_SET) < 0) {
+        result = errno;
+        goto sce_done;
+      }
+      resume_at = 0;
+      pthread_mutex_lock(&g_tasks_lock);
+      task->done = 0;
+      task->download_checkpoint_done = 0;
+      pthread_mutex_unlock(&g_tasks_lock);
+      if(write_download_journal(task)) {
+        result = errno ? errno : EIO;
+        goto sce_done;
+      }
     }
     if(sceHttpGetResponseContentLength(request_id, &content_length) == 0 &&
        content_length != ULLONG_MAX) {
@@ -760,6 +780,21 @@ sce_done:
                       error, sizeof(error))) {
       result = errno ? errno : EIO;
       goto done;
+    }
+    if(client.status_code == 200 && resume_at) {
+      if(ftruncate(fd, 0) || lseek(fd, 0, SEEK_SET) < 0) {
+        result = errno;
+        goto done;
+      }
+      resume_at = 0;
+      pthread_mutex_lock(&g_tasks_lock);
+      task->done = 0;
+      task->download_checkpoint_done = 0;
+      pthread_mutex_unlock(&g_tasks_lock);
+      if(write_download_journal(task)) {
+        result = errno ? errno : EIO;
+        goto done;
+      }
     }
     if(content_length) url_task_total(task, content_length);
     while(!task_cancel_requested(task) &&

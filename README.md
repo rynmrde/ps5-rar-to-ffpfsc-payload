@@ -2,6 +2,8 @@
 
 MkPFS-PS5 is a userland payload for jailbroken PlayStation 5 consoles. It combines a PS5 web file manager with native RAR/7z extraction, folder-to-`.ffpfsc` conversion compatible with MkPFS, and direct URL downloads. The browser interface is designed for phones, desktop browsers, and the PS5 browser with a controller.
 
+**Current release: v0.4.7**
+
 > **Important:** The product name does not mean that a RAR file can be converted directly to `.ffpfsc` in one step. The supported workflow is: extract the RAR or 7z archive to a folder, inspect the extracted files, and then convert that folder to `.ffpfsc`.
 
 

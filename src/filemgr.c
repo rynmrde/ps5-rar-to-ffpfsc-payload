@@ -3037,6 +3037,7 @@ api_tasks(struct MHD_Connection *conn) {
 
   strbuf_append(&b, "{\"ok\":true,\"tasks\":[");
   pthread_mutex_lock(&g_tasks_lock);
+  remove_finished_tasks_locked();
   for(task = g_tasks; task; task = task->next) {
     if(!first) {
       strbuf_append(&b, ",");
@@ -3078,7 +3079,6 @@ api_tasks(struct MHD_Connection *conn) {
   } else {
     strbuf_append(&b, "null");
   }
-  remove_finished_tasks_locked();
   pthread_mutex_unlock(&g_tasks_lock);
   strbuf_append(&b, "}");
   return send_buffer(conn, MHD_HTTP_OK, b.data, "application/json");
@@ -3654,6 +3654,7 @@ filemgr_api_request(struct MHD_Connection *conn, const char *url,
       !strcmp(url, "/api/upload/prepare") ||
       !strcmp(url, "/api/upload/finish") || !strcmp(url, "/api/rename") ||
       !strcmp(url, "/api/mkdir") || !strcmp(url, "/api/chmod") ||
+      !strcmp(url, "/api/download/prepare") ||
       !strcmp(url, "/api/install-pkg") ||
       !strcmp(url, "/api/text/create") || !strcmp(url, "/api/text/save")) &&
      strcmp(method, MHD_HTTP_METHOD_POST)) {

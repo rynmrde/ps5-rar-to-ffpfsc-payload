@@ -14,10 +14,10 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
-    def send_payload(self, payload, slow=False):
+    def send_payload(self, payload, slow=False, ignore_range=False):
         start = 0
         range_header = self.headers.get("Range", "")
-        if range_header:
+        if range_header and not ignore_range:
             if not range_header.startswith("bytes=") or not range_header.endswith("-"):
                 self.send_error(416, "invalid range")
                 return
@@ -49,6 +49,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_payload(PAYLOAD)
         elif self.path == "/slow.bin":
             self.send_payload(SLOW_PAYLOAD, slow=True)
+        elif self.path == "/ignore-range.bin":
+            self.send_payload(SLOW_PAYLOAD, slow=True, ignore_range=True)
         elif self.path == "/no-length.bin":
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
