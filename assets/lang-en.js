@@ -1,5 +1,7 @@
 window.WFM_LANG = {
   appTitle: "MkPFS-PS5",
+  launcher: "Launcher",
+  convertHint: "Select a folder, then choose Convert folder to build a .ffpfsc image.",
   copy: "Copy",
   move: "Move",
   delete: "Delete",

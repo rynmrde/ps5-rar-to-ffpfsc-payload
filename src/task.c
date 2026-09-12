@@ -80,6 +80,10 @@ free_task(file_task_t *task) {
   free(task);
 }
 
+/* Terminal tasks are retained for 60 seconds so every polling client can
+ * observe the final state.  Must be called with g_tasks_lock held. */
+#define TASK_TERMINAL_TTL_SECONDS 60
+
 void
 remove_finished_tasks_locked(void) {
   file_task_t **link = &g_tasks;
@@ -87,13 +91,27 @@ remove_finished_tasks_locked(void) {
 
   while(*link) {
     file_task_t *task = *link;
+    int terminal = task->state == TASK_DONE || task->state == TASK_FAILED ||
+                   task->state == TASK_CANCELED;
+    int within_ttl = 0;
+
+    if(terminal) {
+      if(!task->updated_at) {
+        /* A terminal task without a timestamp must never be freed
+         * immediately; stamp it now so the TTL applies uniformly. */
+        task->updated_at = now;
+        within_ttl = 1;
+      } else if(now < task->updated_at) {
+        /* The wall clock moved backwards (NTP/user adjustment).  Treat
+         * the task as freshly finished instead of expiring it early. */
+        within_ttl = 1;
+      } else if(now - task->updated_at < TASK_TERMINAL_TTL_SECONDS) {
+        within_ttl = 1;
+      }
+    }
 
     if(task_is_active(task) || task->state == TASK_PAUSED || task->worker_active ||
-       ((task->state == TASK_DONE || task->state == TASK_FAILED ||
-         task->state == TASK_CANCELED) &&
-        task->updated_at && now >= task->updated_at &&
-        now - task->updated_at < 60) ||
-       task->active_streams ||
+       within_ttl || task->active_streams ||
        (task->op == TASK_PKG_INSTALL && !task->reported)) {
       link = &task->next;
       continue;

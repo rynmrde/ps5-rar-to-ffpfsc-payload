@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#include "asset.h"
 #include "filemgr_internal.h"
 #include "mime.h"
 #include "path_util.h"
@@ -33,13 +34,26 @@ file_close(void *cls) {
 
 enum MHD_Result
 filemgr_fs_request(struct MHD_Connection *conn) {
-  char *path = absolute_path_value(query_value(conn, "path"));
+  const char *raw_path = MHD_lookup_connection_value(conn,
+                                                     MHD_GET_ARGUMENT_KIND,
+                                                     "path");
+  char *path;
   struct MHD_Response *resp;
   enum MHD_Result ret = MHD_NO;
   struct stat st;
   FILE *file;
 
+  /* The launcher links here for file management: without a path query this
+   * endpoint serves the manager UI, while ?path= keeps streaming raw file
+   * bytes for previews.  Launch hints such as ?convert=1 also land here. */
+  if(!raw_path || !raw_path[0]) {
+    return asset_request(conn, "/manager.html");
+  }
+
+  path = absolute_path_value(query_value(conn, "path"));
+
   if(has_active_task()) {
+    free(path);
     return send_json_error(conn, MHD_HTTP_CONFLICT, "another task is running");
   }
 

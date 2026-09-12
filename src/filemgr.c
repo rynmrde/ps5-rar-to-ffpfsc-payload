@@ -1558,6 +1558,118 @@ remove_staging_tree(const char *path) {
   return unlink(path);
 }
 
+/* Upper bound for the post-extraction verification walk.  A legitimate
+ * game archive never approaches one million members; anything beyond that
+ * fails closed instead of stalling the worker. */
+#define EXTRACT_VERIFY_ENTRY_LIMIT 1000000UL
+
+static int
+verify_extract_tree_entries(const char *path, unsigned long *count,
+                            char *reason, size_t reason_size) {
+  DIR *dir;
+  struct dirent *entry;
+
+  dir = opendir(path);
+  if(!dir) {
+    snprintf(reason, reason_size, "cannot inspect extracted output");
+    return -1;
+  }
+  while((entry = readdir(dir))) {
+    char child[PATH_MAX];
+    struct stat st;
+
+    if(!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+    if(++(*count) > EXTRACT_VERIFY_ENTRY_LIMIT) {
+      snprintf(reason, reason_size, "archive contains too many entries");
+      errno = EFBIG;
+      closedir(dir);
+      return -1;
+    }
+    if(path_join(child, sizeof(child), path, entry->d_name)) {
+      /* path_join() rejects overlong paths and unsafe names (backslash);
+       * both fail closed here, matching the copy/move workers. */
+      snprintf(reason, reason_size,
+               errno == ENAMETOOLONG ? "extracted path is too long" :
+                                       "extracted entry name is unsafe");
+      closedir(dir);
+      return -1;
+    }
+    /* lstat() never follows the final component, so an archive-supplied
+     * symlink is observed as a symlink here even if it points at a
+     * directory outside the staging tree. */
+    if(lstat(child, &st)) {
+      snprintf(reason, reason_size, "cannot inspect extracted output");
+      closedir(dir);
+      return -1;
+    }
+    if(S_ISLNK(st.st_mode)) {
+      snprintf(reason, reason_size, "archive produced a symlink: %s",
+               entry->d_name);
+      errno = EPERM;
+      closedir(dir);
+      return -1;
+    }
+    if(S_ISDIR(st.st_mode)) {
+      if(verify_extract_tree_entries(child, count, reason, reason_size)) {
+        closedir(dir);
+        return -1;
+      }
+      continue;
+    }
+    if(!S_ISREG(st.st_mode) || st.st_nlink != 1) {
+      snprintf(reason, reason_size, "archive produced an unsafe entry: %s",
+               entry->d_name);
+      errno = EPERM;
+      closedir(dir);
+      return -1;
+    }
+  }
+  closedir(dir);
+  return 0;
+}
+
+/* Final containment gate between archive decoding and atomic publication.
+ * The RAR path sets SkipSymLinks and the 7z path validates member names,
+ * but neither guarantee is re-checked here: this walk proves, with lstat()
+ * only, that the staging tree about to be renamed holds plain files and
+ * directories and nothing else.  A single symlink, hardlink, fifo, socket,
+ * or device node fails the extraction before rename() can publish it. */
+static int
+verify_extract_staging_tree(const char *staging, char *reason,
+                            size_t reason_size) {
+  struct stat st;
+  unsigned long count = 0;
+
+  if(!staging || !reason || !reason_size) {
+    errno = EINVAL;
+    return -1;
+  }
+  reason[0] = 0;
+  if(lstat(staging, &st)) {
+    snprintf(reason, reason_size, "extraction staging is not a directory");
+    return -1;
+  }
+  if(!S_ISDIR(st.st_mode)) {
+    snprintf(reason, reason_size, "extraction staging is not a directory");
+    errno = ENOTDIR;
+    return -1;
+  }
+  return verify_extract_tree_entries(staging, &count, reason, reason_size);
+}
+
+static int
+sync_directory_path(const char *path) {
+  int fd = open(path, O_RDONLY | O_DIRECTORY);
+  if(fd < 0) return -1;
+  if(fsync(fd) && errno != EINVAL && errno != ENOTSUP) {
+    int saved = errno;
+    close(fd);
+    errno = saved;
+    return -1;
+  }
+  return close(fd);
+}
+
 static int
 resolve_destination(const char *src, const char *dst, char *out, size_t size) {
   struct stat st;
@@ -2415,17 +2527,48 @@ task_worker(void *arg) {
     char parent[PATH_MAX];
     char staging[PATH_MAX];
     char archive_error[160] = {0};
+    char verify_reason[160] = {0};
     archive_progress_ctx_t progress = {.task = task, .last_percent = 0};
     struct stat destination_st;
+    struct stat final_st;
+    int stage_ready = 0;
 
     if(path_dirname(task->dst, parent, sizeof(parent)) ||
        lstat(parent, &destination_st) || !S_ISDIR(destination_st.st_mode) ||
        snprintf(staging, sizeof(staging), "%s/.mkpfs-extract-%lu.tmp", parent,
                 task->id) >= (int)sizeof(staging)) {
       ret = EINVAL;
-    } else if(mkdir(staging, 0700)) {
-      ret = errno;
+      snprintf(archive_error, sizeof(archive_error),
+               "invalid extraction destination");
     } else {
+      struct stat staging_st;
+      /* Task ids restart at 1 on every payload launch, so a run killed
+       * mid-extraction can leave a staging directory behind under this
+       * task's deterministic name.  Reclaim only that private name;
+       * anything else in the parent directory is left untouched. */
+      if(!lstat(staging, &staging_st)) {
+        if(remove_staging_tree(staging) || mkdir(staging, 0700)) {
+          ret = errno ? errno : EIO;
+          snprintf(archive_error, sizeof(archive_error),
+                   "cannot prepare extraction staging: %s", strerror(ret));
+        } else {
+          stage_ready = 1;
+        }
+      } else if(errno == ENOENT) {
+        if(mkdir(staging, 0700)) {
+          ret = errno ? errno : EIO;
+          snprintf(archive_error, sizeof(archive_error),
+                   "cannot prepare extraction staging: %s", strerror(ret));
+        } else {
+          stage_ready = 1;
+        }
+      } else {
+        ret = errno ? errno : EIO;
+        snprintf(archive_error, sizeof(archive_error),
+                 "cannot prepare extraction staging: %s", strerror(ret));
+      }
+    }
+    if(stage_ready) {
       task_set_total(task, 100);
       task_update(task, TASK_RUNNING, "extracting archive", 0, NULL);
       ret = archive_extract_run(task->srcs[0], staging, task->archive_password,
@@ -2433,8 +2576,37 @@ task_worker(void *arg) {
                                 (volatile int *)&task->cancel_requested,
                                 archive_progress, &progress, archive_error,
                                 sizeof(archive_error));
-      if(ret == 0 && !task_cancel_requested(task) && rename(staging, task->dst)) {
-        ret = errno;
+      if(ret == 0 && !task_cancel_requested(task)) {
+        /* Atomic publication gate: re-validate every assumption made at
+         * request time, prove the staging tree holds only plain files
+         * and directories, and only then rename it onto the final name. */
+        if(lstat(parent, &destination_st) || !S_ISDIR(destination_st.st_mode)) {
+          ret = errno ? errno : EIO;
+          snprintf(archive_error, sizeof(archive_error),
+                   "extraction destination is no longer a directory");
+        } else if(lstat(task->dst, &final_st) == 0) {
+          ret = EEXIST;
+          snprintf(archive_error, sizeof(archive_error),
+                   "extraction destination already exists");
+        } else if(errno != ENOENT) {
+          ret = errno ? errno : EIO;
+          snprintf(archive_error, sizeof(archive_error),
+                   "cannot access extraction destination: %s", strerror(ret));
+        } else if(verify_extract_staging_tree(staging, verify_reason,
+                                              sizeof(verify_reason))) {
+          ret = errno ? errno : EIO;
+          snprintf(archive_error, sizeof(archive_error), "%s", verify_reason);
+        } else if(rename(staging, task->dst)) {
+          ret = errno ? errno : EIO;
+          snprintf(archive_error, sizeof(archive_error),
+                   "cannot publish extraction output: %s", strerror(ret));
+        } else if(sync_directory_path(parent)) {
+          /* The rename is atomic but not yet durable.  Match the
+           * downloader's publish semantics and report the failure. */
+          ret = errno ? errno : EIO;
+          snprintf(archive_error, sizeof(archive_error),
+                   "extraction publish sync failed: %s", strerror(ret));
+        }
       }
       if(ret != 0 || task_cancel_requested(task)) {
         int cleanup_errno;
@@ -2445,13 +2617,17 @@ task_worker(void *arg) {
                                          strerror(cleanup_errno));
         }
       }
-      if(ret != 0 && archive_error[0]) {
-        task_set_error_code(task,
-                            strcasestr(archive_error, "password") ?
-                            "archive_password" : "archive_extract_failed",
-                            task->srcs[0]);
-        task_update(task, TASK_RUNNING, task->srcs[0], 0, archive_error);
-      }
+    }
+    /* Recorded outside the stage_ready gate so staging-setup failures
+     * report their cause too.  task->error carries the message to the
+     * final TASK_FAILED transition; a bare errno would be clobbered by
+     * the tool-exit-code mapping below. */
+    if(ret != 0 && archive_error[0]) {
+      task_set_error_code(task,
+                          strcasestr(archive_error, "password") ?
+                          "archive_password" : "archive_extract_failed",
+                          task->srcs[0]);
+      task_update(task, TASK_RUNNING, task->srcs[0], 0, archive_error);
     }
     if(task_cancel_requested(task) && ret == 0) ret = ECANCELED;
     if(ret == 255) {
@@ -3028,60 +3204,147 @@ extract_error:
     "invalid extraction request");
 }
 
+/* Plain-data copy of the fields /api/tasks exposes.  The snapshot is taken
+ * under g_tasks_lock and serialized after the mutex is released, so the
+ * JSON builder never touches live task memory: no worker thread can free
+ * or mutate a task while a slow poller is still formatting it, and a slow
+ * poller never blocks task progress behind the global mutex. */
+typedef struct task_snapshot {
+  unsigned long id;
+  task_op_t op;
+  task_state_t state;
+  char src[PATH_MAX];
+  char dst[PATH_MAX];
+  char current[PATH_MAX];
+  char error[160];
+  char error_code[64];
+  char error_arg[PATH_MAX + 96];
+  size_t src_count;
+  size_t upload_completed;
+  unsigned long long total;
+  unsigned long long done;
+  unsigned long long speed;
+  unsigned long long eta;
+  int cancel_requested;
+  time_t created_at;
+  time_t transfer_started_at;
+  time_t updated_at;
+} task_snapshot_t;
+
 static enum MHD_Result
 api_tasks(struct MHD_Connection *conn) {
   strbuf_t b = {0};
+  task_snapshot_t *snapshots = NULL;
+  task_completion_t completion;
+  size_t snapshot_count = 0;
+  size_t snapshot_index = 0;
   file_task_t *task;
   time_t now = time(NULL);
   int first = 1;
+  enum MHD_Result ret;
 
-  strbuf_append(&b, "{\"ok\":true,\"tasks\":[");
   pthread_mutex_lock(&g_tasks_lock);
   remove_finished_tasks_locked();
-  for(task = g_tasks; task; task = task->next) {
+  for(task = g_tasks; task; task = task->next) snapshot_count++;
+  if(snapshot_count) {
+    snapshots = calloc(snapshot_count, sizeof(*snapshots));
+    if(!snapshots) {
+      pthread_mutex_unlock(&g_tasks_lock);
+      return send_json_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+                             "out of memory");
+    }
+    for(task = g_tasks; task; task = task->next) {
+      task_snapshot_t *snapshot = &snapshots[snapshot_index++];
+      snapshot->id = task->id;
+      snapshot->op = task->op;
+      snapshot->state = task->state;
+      snprintf(snapshot->src, sizeof(snapshot->src), "%s", task->src);
+      snprintf(snapshot->dst, sizeof(snapshot->dst), "%s", task->dst);
+      snprintf(snapshot->current, sizeof(snapshot->current), "%s", task->current);
+      snprintf(snapshot->error, sizeof(snapshot->error), "%s", task->error);
+      snprintf(snapshot->error_code, sizeof(snapshot->error_code), "%s",
+               task->error_code);
+      snprintf(snapshot->error_arg, sizeof(snapshot->error_arg), "%s",
+               task->error_arg);
+      snapshot->src_count = task->src_count;
+      snapshot->upload_completed = task->upload_completed;
+      snapshot->total = task->total;
+      snapshot->done = task->done;
+      snapshot->speed = task->speed;
+      snapshot->eta = task->eta;
+      snapshot->cancel_requested =
+        atomic_load_explicit(&task->cancel_requested, memory_order_acquire);
+      snapshot->created_at = task->created_at;
+      snapshot->transfer_started_at = task->transfer_started_at;
+      snapshot->updated_at = task->updated_at;
+      if(!task_is_active(task)) task->reported = 1;
+    }
+  }
+  completion = g_last_completion;
+  pthread_mutex_unlock(&g_tasks_lock);
+
+  /* The live task list is no longer referenced from here on; every byte
+   * below comes from the immutable snapshot. */
+  if(strbuf_append(&b, "{\"ok\":true,\"tasks\":[")) goto tasks_oom;
+  for(snapshot_index = 0; snapshot_index < snapshot_count; snapshot_index++) {
+    const task_snapshot_t *snapshot = &snapshots[snapshot_index];
+    long long elapsed = 0;
+    long long total_elapsed = 0;
+
+    if(snapshot->transfer_started_at && now >= snapshot->transfer_started_at) {
+      elapsed = (long long)(now - snapshot->transfer_started_at);
+    }
+    if(snapshot->created_at && now >= snapshot->created_at) {
+      total_elapsed = (long long)(now - snapshot->created_at);
+    }
     if(!first) {
-      strbuf_append(&b, ",");
+      if(strbuf_append(&b, ",")) goto tasks_oom;
     }
     first = 0;
-    strbuf_printf(&b, "{\"id\":%lu,\"op\":\"%s\",\"state\":\"%s\",",
-                  task->id, task_op_name(task->op), task_state_name(task->state));
-    strbuf_append(&b, "\"src\":");
-    json_escape(&b, task->src);
-    strbuf_append(&b, ",\"dst\":");
-    json_escape(&b, task->dst);
-    strbuf_append(&b, ",\"current\":");
-    json_escape(&b, task->current);
-    strbuf_append(&b, ",\"error\":");
-    json_escape(&b, task->error);
-    strbuf_append(&b, ",\"error_code\":");
-    json_escape(&b, task->error_code);
-    strbuf_append(&b, ",\"error_arg\":");
-    json_escape(&b, task->error_arg);
-    strbuf_printf(&b, ",\"src_count\":%zu,\"completed_count\":%zu,\"total\":%llu,\"done\":%llu,\"speed\":%llu,\"eta\":%llu,\"cancel_requested\":%s,\"created_at\":%lld,\"elapsed\":%lld,\"total_elapsed\":%lld,\"updated_at\":%lld}",
-                  task->src_count, task->upload_completed,
-                  task->total, task->done, task->speed, task->eta,
-                  atomic_load_explicit(&task->cancel_requested, memory_order_acquire) ? "true" : "false",
-                  (long long)task->created_at,
-                  task->transfer_started_at ? (long long)(now - task->transfer_started_at) : 0LL,
-                  task->created_at ? (long long)(now - task->created_at) : 0LL,
-                  (long long)task->updated_at);
-    if(!task_is_active(task)) task->reported = 1;
+    if(strbuf_printf(&b, "{\"id\":%lu,\"op\":\"%s\",\"state\":\"%s\",",
+                     snapshot->id, task_op_name(snapshot->op),
+                     task_state_name(snapshot->state)) ||
+       strbuf_append(&b, "\"src\":") || json_escape(&b, snapshot->src) ||
+       strbuf_append(&b, ",\"dst\":") || json_escape(&b, snapshot->dst) ||
+       strbuf_append(&b, ",\"current\":") || json_escape(&b, snapshot->current) ||
+       strbuf_append(&b, ",\"error\":") || json_escape(&b, snapshot->error) ||
+       strbuf_append(&b, ",\"error_code\":") ||
+       json_escape(&b, snapshot->error_code) ||
+       strbuf_append(&b, ",\"error_arg\":") ||
+       json_escape(&b, snapshot->error_arg) ||
+       strbuf_printf(&b, ",\"src_count\":%zu,\"completed_count\":%zu,\"total\":%llu,\"done\":%llu,\"speed\":%llu,\"eta\":%llu,\"cancel_requested\":%s,\"created_at\":%lld,\"elapsed\":%lld,\"total_elapsed\":%lld,\"updated_at\":%lld}",
+                     snapshot->src_count, snapshot->upload_completed,
+                     snapshot->total, snapshot->done, snapshot->speed,
+                     snapshot->eta, snapshot->cancel_requested ? "true" : "false",
+                     (long long)snapshot->created_at, elapsed, total_elapsed,
+                     (long long)snapshot->updated_at)) {
+      goto tasks_oom;
+    }
   }
-  strbuf_printf(&b, "],\"now\":%lld,\"completion\":", (long long)now);
-  if(g_last_completion.id) {
-    strbuf_printf(&b, "{\"id\":%lu,\"op\":\"%s\",\"src\":",
-                  g_last_completion.id, task_op_name(g_last_completion.op));
-    json_escape(&b, g_last_completion.src);
-    strbuf_printf(&b, ",\"src_count\":%zu,\"elapsed\":%lld,\"total\":%llu,\"file_count\":%zu}",
-                  g_last_completion.src_count,
-                  (long long)g_last_completion.elapsed,
-                  g_last_completion.total, g_last_completion.file_count);
+  if(strbuf_printf(&b, "],\"now\":%lld,\"completion\":", (long long)now)) {
+    goto tasks_oom;
+  }
+  if(completion.id) {
+    if(strbuf_printf(&b, "{\"id\":%lu,\"op\":\"%s\",\"src\":",
+                     completion.id, task_op_name(completion.op)) ||
+       json_escape(&b, completion.src) ||
+       strbuf_printf(&b, ",\"src_count\":%zu,\"elapsed\":%lld,\"total\":%llu,\"file_count\":%zu}",
+                     completion.src_count, (long long)completion.elapsed,
+                     completion.total, completion.file_count)) {
+      goto tasks_oom;
+    }
   } else {
-    strbuf_append(&b, "null");
+    if(strbuf_append(&b, "null")) goto tasks_oom;
   }
-  pthread_mutex_unlock(&g_tasks_lock);
-  strbuf_append(&b, "}");
+  if(strbuf_append(&b, "}")) goto tasks_oom;
+  free(snapshots);
   return send_buffer(conn, MHD_HTTP_OK, b.data, "application/json");
+
+tasks_oom:
+  free(snapshots);
+  free(b.data);
+  ret = send_json_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "out of memory");
+  return ret;
 }
 
 static enum MHD_Result
@@ -3090,7 +3353,10 @@ api_cancel(struct MHD_Connection *conn) {
   unsigned long id = idstr ? strtoul(idstr, NULL, 10) : 0;
   file_task_t *task;
   int found = 0;
-  int discard_paused = 0;
+
+  char discard_temporary[PATH_MAX] = {0};
+  char discard_journal[PATH_MAX] = {0};
+  int discard_state = 0;
 
   free(idstr);
   pthread_mutex_lock(&g_tasks_lock);
@@ -3101,12 +3367,20 @@ api_cancel(struct MHD_Connection *conn) {
       if(task->op == TASK_URL_DOWNLOAD && task->state == TASK_FAILED) {
         task->state = TASK_CANCELED;
         snprintf(task->error, sizeof(task->error), "cleared");
-        url_download_discard_state(task);
+        snprintf(discard_temporary, sizeof(discard_temporary), "%s",
+                 task->download_temporary);
+        snprintf(discard_journal, sizeof(discard_journal), "%s",
+                 task->download_journal);
+        discard_state = 1;
       }
       if(task->op == TASK_URL_DOWNLOAD && task->state == TASK_PAUSED) {
         task->state = TASK_CANCELED;
         snprintf(task->error, sizeof(task->error), "canceled");
-        discard_paused = 1;
+        snprintf(discard_temporary, sizeof(discard_temporary), "%s",
+                 task->download_temporary);
+        snprintf(discard_journal, sizeof(discard_journal), "%s",
+                 task->download_journal);
+        discard_state = 1;
       }
       if(task->op == TASK_DOWNLOAD && task->state == TASK_QUEUED) {
         task->state = TASK_CANCELED;
@@ -3123,7 +3397,12 @@ api_cancel(struct MHD_Connection *conn) {
     pthread_cond_broadcast(&g_url_download_slot);
     pthread_mutex_unlock(&g_url_download_lock);
   }
-  if(discard_paused) url_download_discard_state(task);
+  /* The task pointer is only valid under g_tasks_lock: unlink the copied
+   * staging paths after unlocking instead of dereferencing it. */
+  if(discard_state) {
+    if(discard_temporary[0]) unlink(discard_temporary);
+    if(discard_journal[0]) unlink(discard_journal);
+  }
 
   return found ? send_json_ok(conn) :
                  send_json_error(conn, MHD_HTTP_NOT_FOUND, "active task not found");

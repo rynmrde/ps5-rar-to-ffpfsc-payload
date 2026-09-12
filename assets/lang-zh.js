@@ -1,5 +1,7 @@
 window.WFM_LANG = {
   appTitle: "MkPFS-PS5",
+  launcher: "启动器",
+  convertHint: "选择一个文件夹，然后选择“转换文件夹”以构建 .ffpfsc 镜像。",
   copy: "复制",
   move: "移动",
   delete: "删除",

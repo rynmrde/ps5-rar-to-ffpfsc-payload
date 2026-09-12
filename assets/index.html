@@ -26,70 +26,818 @@
         .logo { font-size: 28px; font-weight: 700; letter-spacing: 2px; background: linear-gradient(90deg, #fff, var(--accent)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
         .status-indicator { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--text-secondary); }
         .dot { width: 8px; height: 8px; background: var(--success); border-radius: 50%; box-shadow: 0 0 10px var(--success); animation: pulse 2s infinite; }
+        .dot.degraded { background: var(--warning); box-shadow: 0 0 10px var(--warning); }
+        .dot.offline { background: var(--danger); box-shadow: 0 0 10px var(--danger); animation: none; }
         @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px; margin-bottom: 40px; }
         .card { background: var(--glass); border: 1px solid var(--glass-border); border-radius: 16px; padding: 24px; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); transition: transform 0.3s ease, box-shadow 0.3s ease, border-color 0.3s; }
         .card:hover, .card:focus { transform: translateY(-5px); box-shadow: 0 10px 30px rgba(0,0,0,0.5); border-color: var(--accent); outline: none; }
+        .card:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow), 0 10px 30px rgba(0,0,0,0.5); }
         .card-title { font-size: 18px; margin-bottom: 12px; color: var(--text-primary); }
         .card-desc { font-size: 14px; color: var(--text-secondary); margin-bottom: 20px; line-height: 1.5; }
         .btn { display: inline-block; padding: 12px 20px; background: var(--accent); color: white; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; text-align: center; width: 100%; }
         .btn:hover, .btn:focus { background: #005bb5; box-shadow: 0 0 15px var(--accent-glow); outline: none; }
+        .btn:focus-visible { box-shadow: 0 0 0 2px #fff, 0 0 15px var(--accent-glow); }
+        .btn:disabled { opacity: .55; cursor: default; box-shadow: none; }
+        .btn.secondary { background: rgba(255,255,255,.08); border: 1px solid var(--glass-border); }
+        .btn.secondary:hover, .btn.secondary:focus { background: rgba(255,255,255,.15); box-shadow: none; }
+        .btn.danger { background: rgba(255,51,51,.15); border: 1px solid rgba(255,51,51,.4); color: #ff8080; }
+        .btn.danger:hover, .btn.danger:focus { background: rgba(255,51,51,.3); color: #fff; box-shadow: none; }
         .section-title { font-size: 22px; margin-bottom: 20px; padding-left: 10px; border-left: 4px solid var(--accent); }
         .task-list { background: var(--glass); border: 1px solid var(--glass-border); border-radius: 16px; overflow: hidden; backdrop-filter: blur(12px); }
-        .task-item { padding: 16px 24px; border-bottom: 1px solid var(--glass-border); display: flex; justify-content: space-between; align-items: center; }
+        .task-item { padding: 16px 24px; border-bottom: 1px solid var(--glass-border); display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
         .task-item:last-child { border-bottom: none; }
-        .task-info h4 { font-size: 16px; margin-bottom: 4px; }
-        .task-info p { font-size: 12px; color: var(--text-secondary); }
+        .task-info { min-width: 0; flex: 1 1 300px; }
+        .task-info h4 { font-size: 16px; margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .task-info p { font-size: 12px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .task-info .task-error { color: #ff8080; white-space: normal; }
+        .task-meta { font-size: 11px; color: var(--text-secondary); margin-top: 6px; }
         .progress-container { text-align: right; }
         .progress-bar { width: 150px; height: 6px; background: #333; border-radius: 3px; overflow: hidden; margin-bottom: 5px; }
         .progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), #00aaff); transition: width 0.5s ease; box-shadow: 0 0 8px var(--accent-glow); }
         .status-badge { font-size: 11px; padding: 3px 8px; border-radius: 12px; font-weight: bold; }
         .status-running { background: rgba(0, 111, 205, 0.2); color: #4da6ff; }
+        .status-queued { background: rgba(255, 204, 0, 0.15); color: var(--warning); }
+        .status-paused { background: rgba(255, 204, 0, 0.15); color: var(--warning); }
         .status-done { background: rgba(0, 204, 102, 0.2); color: var(--success); }
         .status-failed { background: rgba(255, 51, 51, 0.2); color: var(--danger); }
+        .status-canceled { background: rgba(160, 160, 160, 0.2); color: var(--text-secondary); }
+        .task-controls { display: flex; gap: 8px; margin-top: 8px; justify-content: flex-end; flex-wrap: wrap; }
+        .task-btn { padding: 6px 14px; border-radius: 6px; border: 1px solid var(--glass-border); background: rgba(255,255,255,.06); color: var(--text-primary); font-size: 12px; font-weight: 600; cursor: pointer; }
+        .task-btn:hover, .task-btn:focus { border-color: var(--accent); outline: none; }
+        .task-btn:focus-visible { box-shadow: 0 0 0 2px var(--accent-glow); }
+        .task-btn:disabled { opacity: .5; cursor: default; }
+        .task-btn.danger { border-color: rgba(255,51,51,.4); color: #ff8080; }
         .empty-state { padding: 40px; text-align: center; color: var(--text-secondary); font-style: italic; }
+        .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,.25); border-top-color: #fff; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: -3px; margin-right: 8px; }
+        .spinner.large { width: 28px; height: 28px; margin-right: 0; margin-bottom: 12px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,.65); display: flex; align-items: center; justify-content: center; z-index: 1000; padding: 20px; }
+        .modal-overlay[hidden] { display: none; }
+        .modal { background: #141821; border: 1px solid var(--glass-border); border-radius: 16px; padding: 28px; width: 100%; max-width: 560px; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,.6); }
+        .modal h3 { font-size: 20px; margin-bottom: 6px; }
+        .modal .modal-sub { font-size: 13px; color: var(--text-secondary); margin-bottom: 20px; }
+        .field { margin-bottom: 16px; }
+        .field label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; color: var(--text-secondary); }
+        .field input[type="text"], .field input[type="password"], .field select { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--glass-border); background: rgba(255,255,255,.05); color: var(--text-primary); font-size: 14px; }
+        .field input:focus, .field select:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 10px var(--accent-glow); }
+        .field-row { display: flex; gap: 8px; }
+        .field-row input { flex: 1; min-width: 0; }
+        .field-row .btn { width: auto; white-space: nowrap; }
+        .field select { width: auto; min-width: 140px; }
+        .modal-actions { display: flex; gap: 12px; margin-top: 24px; }
+        .modal-actions .btn { width: auto; flex: 1; }
+        .modal-error { display: none; margin-top: 16px; padding: 10px 14px; border-radius: 8px; background: rgba(255,51,51,.12); border: 1px solid rgba(255,51,51,.35); color: #ff9999; font-size: 13px; }
+        .modal-error.visible { display: block; }
+        .browser-list { border: 1px solid var(--glass-border); border-radius: 8px; max-height: 260px; overflow-y: auto; margin-bottom: 8px; }
+        .browser-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 14px; background: none; border: none; border-bottom: 1px solid rgba(255,255,255,.04); color: var(--text-primary); font-size: 14px; text-align: left; cursor: pointer; }
+        .browser-item:last-child { border-bottom: none; }
+        .browser-item:hover, .browser-item:focus { background: rgba(0,111,205,.15); outline: none; }
+        .browser-item:disabled { opacity: .45; cursor: default; background: none; }
+        .browser-item .browser-icon { width: 22px; text-align: center; }
+        .browser-item .browser-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .browser-item .browser-size { font-size: 11px; color: var(--text-secondary); flex: 0 0 auto; }
+        .browser-item.selected { background: rgba(0,111,205,.3); }
+        .browser-path { font-size: 12px; color: var(--text-secondary); font-family: monospace; margin-bottom: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .browser-roots { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+        .browser-roots .task-btn { font-size: 11px; }
+        #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px); background: #1a2233; border: 1px solid var(--glass-border); color: var(--text-primary); padding: 12px 22px; border-radius: 10px; font-size: 14px; opacity: 0; pointer-events: none; transition: opacity .3s, transform .3s; z-index: 2000; max-width: 90vw; box-shadow: 0 10px 30px rgba(0,0,0,.5); }
+        #toast.visible { opacity: 1; transform: translateX(-50%) translateY(0); }
+        #toast.error { border-color: rgba(255,51,51,.5); }
+        #toast.success { border-color: rgba(0,204,102,.5); }
     </style>
 </head>
 <body>
 <div class="container">
     <header>
         <div class="logo">MkPFS LAUNCHER</div>
-        <div class="status-indicator"><div class="dot"></div><span>System Online</span></div>
+        <div class="status-indicator"><div class="dot" id="status-dot"></div><span id="status-text">System Online</span></div>
     </header>
     <h2 class="section-title">Quick Actions</h2>
     <div class="grid">
-        <div class="card" tabindex="0"><h3 class="card-title">File Manager</h3><p class="card-desc">Browse internal storage, USB drives, and manage your PS5 directories securely.</p><button class="btn" onclick="navigate('/fs')">Open Manager</button></div>
-        <div class="card" tabindex="0"><h3 class="card-title">URL Downloader</h3><p class="card-desc">Fetch direct HTTP/HTTPS links and inject them directly into your console storage.</p><button class="btn" onclick="alert('UI Modal for URL Download')">New Download</button></div>
-        <div class="card" tabindex="0"><h3 class="card-title">Archive Extractor</h3><p class="card-desc">Native RAR and 7z extraction with password support and multi-part handling.</p><button class="btn" onclick="alert('UI Modal for Extractor')">Extract Files</button></div>
-        <div class="card" tabindex="0"><h3 class="card-title">FFPFSC Converter</h3><p class="card-desc">Convert extracted game folders into optimized .ffpfsc images for external storage.</p><button class="btn" onclick="navigate('/fs?convert=1')">Convert Folder</button></div>
+        <div class="card" tabindex="0" data-action="manager"><h3 class="card-title">File Manager</h3><p class="card-desc">Browse internal storage, USB drives, and manage your PS5 directories securely.</p><button class="btn" id="btn-manager">Open Manager</button></div>
+        <div class="card" tabindex="0" data-action="url"><h3 class="card-title">URL Downloader</h3><p class="card-desc">Fetch direct HTTP/HTTPS links and inject them directly into your console storage.</p><button class="btn" id="btn-url">New Download</button></div>
+        <div class="card" tabindex="0" data-action="extract"><h3 class="card-title">Archive Extractor</h3><p class="card-desc">Native RAR and 7z extraction with password support and multi-part handling.</p><button class="btn" id="btn-extract">Extract Files</button></div>
+        <div class="card" tabindex="0" data-action="convert"><h3 class="card-title">FFPFSC Converter</h3><p class="card-desc">Convert extracted game folders into optimized .ffpfsc images for external storage.</p><button class="btn" id="btn-convert">Convert Folder</button></div>
     </div>
-    <h2 class="section-title">Active Jobs</h2>
-    <div class="task-list" id="task-list"><div class="empty-state">Scanning for active tasks...</div></div>
+    <h2 class="section-title" id="jobs-heading" tabindex="-1">Active Jobs</h2>
+    <div class="task-list" id="task-list"><div class="empty-state"><span class="spinner large"></span><br>Scanning for active tasks...</div></div>
 </div>
+
+<div class="modal-overlay" id="url-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="url-title">
+        <h3 id="url-title">New URL Download</h3>
+        <p class="modal-sub">POST /api/url-download &mdash; resumable, journaled transfer</p>
+        <div class="field">
+            <label for="url-input">HTTP or HTTPS URL</label>
+            <input type="text" id="url-input" placeholder="https://example.com/file.pkg" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="field">
+            <label for="url-dest">Destination folder</label>
+            <div class="field-row">
+                <input type="text" id="url-dest" readonly placeholder="/data">
+                <button class="btn secondary" id="url-browse" type="button">Browse</button>
+            </div>
+        </div>
+        <div class="field">
+            <label for="url-name">Output filename</label>
+            <input type="text" id="url-name" placeholder="download.bin" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="modal-error" id="url-error"></div>
+        <div class="modal-actions">
+            <button class="btn secondary" id="url-cancel" type="button">Cancel</button>
+            <button class="btn" id="url-submit" type="button">Start Download</button>
+        </div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="extract-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="extract-title">
+        <h3 id="extract-title">Extract Archive</h3>
+        <p class="modal-sub">POST /api/extract &mdash; RAR / 7z with staged atomic publish</p>
+        <div class="field">
+            <label for="extract-source">Archive file (.rar, .r00, .7z, .7z.001)</label>
+            <div class="field-row">
+                <input type="text" id="extract-source" readonly placeholder="/data/archive.rar">
+                <button class="btn secondary" id="extract-browse-source" type="button">Browse</button>
+            </div>
+        </div>
+        <div class="field">
+            <label for="extract-dest">Destination folder</label>
+            <div class="field-row">
+                <input type="text" id="extract-dest" readonly placeholder="/data">
+                <button class="btn secondary" id="extract-browse-dest" type="button">Browse</button>
+            </div>
+        </div>
+        <div class="field">
+            <label for="extract-name">Output folder name</label>
+            <input type="text" id="extract-name" placeholder="archive-extracted" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="field">
+            <label for="extract-password">Archive password (blank if none)</label>
+            <input type="password" id="extract-password" autocomplete="off">
+        </div>
+        <div class="field">
+            <label for="extract-workers">Extraction workers</label>
+            <select id="extract-workers">
+                <option value="auto" selected>auto</option>
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="4">4</option>
+                <option value="8">8</option>
+            </select>
+        </div>
+        <div class="modal-error" id="extract-error"></div>
+        <div class="modal-actions">
+            <button class="btn secondary" id="extract-cancel" type="button">Cancel</button>
+            <button class="btn" id="extract-submit" type="button">Start Extraction</button>
+        </div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="browser-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="browser-title">
+        <h3 id="browser-title">Browse</h3>
+        <p class="modal-sub" id="browser-sub">GET /api/roots + /api/list</p>
+        <div class="browser-roots" id="browser-roots"></div>
+        <div class="browser-path" id="browser-path">/</div>
+        <div class="browser-list" id="browser-list"></div>
+        <div class="modal-error" id="browser-error"></div>
+        <div class="modal-actions">
+            <button class="btn secondary" id="browser-cancel" type="button">Cancel</button>
+            <button class="btn" id="browser-select" type="button">Select</button>
+        </div>
+    </div>
+</div>
+
+<div id="toast" role="status"></div>
+
 <script>
-    const API_BASE = window.location.origin;
-    const taskListEl = document.getElementById('task-list');
-    async function fetchAPI(endpoint) { try { const res = await fetch(`${API_BASE}${endpoint}`); return await res.json(); } catch (e) { console.error("API Error", e); return null; } }
-    function navigate(path) { window.location.href = path; }
-    function calculateProgress(task) { if (task.total === 0) return 0; return Math.min(100, Math.round((task.done / task.total) * 100)); }
-    function renderTasks(tasks) {
-        if (!tasks || tasks.length === 0) { taskListEl.innerHTML = '<div class="empty-state">No active jobs. The system is idle.</div>'; return; }
-        taskListEl.innerHTML = tasks.map(task => {
-            const progress = calculateProgress(task);
-            const statusClass = task.state === 'running' ? 'status-running' : task.state === 'done' ? 'status-done' : task.state === 'failed' ? 'status-failed' : '';
-            return `<div class="task-item"><div class="task-info"><h4>${task.op.toUpperCase()}: ${task.src.split('/').pop() || 'Processing...'}</h4><p>Target: ${task.dst || 'N/A'}</p></div><div class="progress-container"><div class="progress-bar"><div class="progress-fill" style="width: ${progress}%"></div></div><span class="status-badge ${statusClass}">${task.state.toUpperCase()} (${progress}%)</span></div></div>`;
-        }).join('');
+(function () {
+    'use strict';
+
+    var taskListEl = document.getElementById('task-list');
+    var statusDotEl = document.getElementById('status-dot');
+    var statusTextEl = document.getElementById('status-text');
+    var toastEl = document.getElementById('toast');
+    var toastTimer = 0;
+    var pollFailures = 0;
+
+    /* ---- auth (same convention as the file manager: #token=...) ---- */
+    function getToken() {
+        try {
+            return new URLSearchParams(window.location.hash.slice(1)).get('token') || '';
+        } catch (e) {
+            return '';
+        }
     }
-    async function pollTasks() { const data = await fetchAPI('/api/tasks'); if (data && data.ok) renderTasks(data.tasks); }
+    function authHeaders() {
+        var token = getToken();
+        return token ? { 'X-WFM-Token': token } : {};
+    }
+    function navigate(path) {
+        window.location.href = path + window.location.hash;
+    }
+
+    /* ---- ui helpers ----
+     * All dynamic strings are rendered through textContent, never innerHTML,
+     * so archive/task paths cannot inject markup into the launcher. */
+    function showToast(message, kind) {
+        toastEl.textContent = message;
+        toastEl.className = 'visible ' + (kind || '');
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(function () { toastEl.className = ''; }, 6000);
+    }
+    function setStatus(online, degraded) {
+        statusDotEl.className = 'dot' + (online ? (degraded ? ' degraded' : '') : ' offline');
+        statusTextEl.textContent = online ? (degraded ? 'Degraded' : 'System Online') : 'Unreachable';
+    }
+    function basename(path) {
+        var clean = String(path || '').replace(/\/+$/, '');
+        var pos = clean.lastIndexOf('/');
+        return pos >= 0 ? clean.slice(pos + 1) : (clean || 'Processing...');
+    }
+    function formatBytes(size) {
+        var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        var value = Number(size || 0);
+        var unit = 0;
+        while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+        if (!unit) return value + ' B';
+        return value.toFixed(1) + ' ' + units[unit];
+    }
+    function formatEta(seconds) {
+        seconds = Number(seconds || 0);
+        if (!seconds || seconds < 0) return '--';
+        seconds = Math.ceil(seconds);
+        var h = Math.floor(seconds / 3600);
+        var m = Math.floor((seconds % 3600) / 60);
+        var s = seconds % 60;
+        if (h) return h + 'h ' + m + 'm';
+        if (m) return m + 'm ' + s + 's';
+        return s + 's';
+    }
+    function opLabel(op) {
+        var labels = { copy: 'COPY', move: 'MOVE', delete: 'DELETE', chmod: 'CHMOD', download: 'DOWNLOAD', url_download: 'URL DOWNLOAD', upload: 'UPLOAD', convert: 'CONVERT', extract: 'EXTRACT', pkg_install: 'PKG INSTALL' };
+        return labels[op] || String(op || 'TASK').toUpperCase();
+    }
+
+    /* ---- api layer ----
+     * State-changing endpoints are POST-only on the backend (405 otherwise)
+     * and take URL-encoded query arguments, matching the file manager. */
+    function apiErrorMessage(data, fallback) {
+        if (data && data.error) {
+            return data.error_code ? data.error + ' (' + data.error_code + ')' : data.error;
+        }
+        return fallback || 'Request failed';
+    }
+    function apiGet(path, params) {
+        var qs = new URLSearchParams(params || {}).toString();
+        return fetch(path + (qs ? '?' + qs : ''), { method: 'GET', headers: authHeaders() })
+            .then(function (res) {
+                return res.text().then(function (text) {
+                    var data = {};
+                    try { data = text ? JSON.parse(text) : {}; } catch (e) { data = {}; }
+                    if (!res.ok || !data.ok) throw new Error(apiErrorMessage(data, 'HTTP ' + res.status));
+                    return data;
+                });
+            });
+    }
+    function apiPost(path, params) {
+        var qs = new URLSearchParams(params || {}).toString();
+        return fetch(path + (qs ? '?' + qs : ''), { method: 'POST', headers: authHeaders() })
+            .then(function (res) {
+                return res.text().then(function (text) {
+                    var data = {};
+                    try { data = text ? JSON.parse(text) : {}; } catch (e) { data = {}; }
+                    if (!res.ok || !data.ok) throw new Error(apiErrorMessage(data, 'HTTP ' + res.status));
+                    return data;
+                });
+            });
+    }
+
+    /* ---- modal plumbing ---- */
+    function openModal(id) {
+        document.getElementById(id).hidden = false;
+        refreshFocusable();
+        var first = document.querySelector('#' + id + ' input, #' + id + ' select, #' + id + ' .btn');
+        if (first) first.focus();
+    }
+    function closeModal(id) {
+        document.getElementById(id).hidden = true;
+        refreshFocusable();
+    }
+    function modalVisible() {
+        var overlays = document.querySelectorAll('.modal-overlay');
+        for (var i = 0; i < overlays.length; i++) {
+            if (!overlays[i].hidden) return true;
+        }
+        return false;
+    }
+    function setModalError(id, message) {
+        var el = document.getElementById(id);
+        el.textContent = message || '';
+        el.classList.toggle('visible', Boolean(message));
+    }
+    function setSubmitting(btn, active, label) {
+        /* Double-submit protection lives on the button itself so one modal
+         * can never silently block the other. */
+        btn.disabled = active;
+        if (active) {
+            btn.setAttribute('data-label', btn.textContent);
+            btn.innerHTML = '<span class="spinner"></span>Working...';
+        } else {
+            btn.textContent = label || btn.getAttribute('data-label') || btn.textContent;
+        }
+    }
+
+    /* ---- path browser (GET /api/roots + /api/list) ---- */
+    var browserMode = 'dir';
+    var browserPath = '/';
+    var browserPickedFile = null;
+    var browserOnPick = null;
+
+    function isArchiveName(name) {
+        return /\.(rar|r[0-9][0-9]|7z|7z\.001)$/i.test(name || '');
+    }
+    function openBrowser(mode, startPath, onPick) {
+        browserMode = mode;
+        browserPath = startPath || '/';
+        browserPickedFile = null;
+        browserOnPick = onPick;
+        document.getElementById('browser-title').textContent =
+            mode === 'archive' ? 'Select Archive' : 'Select Folder';
+        document.getElementById('browser-select').textContent =
+            mode === 'archive' ? 'Select File' : 'Select This Folder';
+        setModalError('browser-error', '');
+        openModal('browser-modal');
+        loadBrowserRoots();
+        loadBrowserPath(browserPath);
+    }
+    function loadBrowserRoots() {
+        var rootsEl = document.getElementById('browser-roots');
+        rootsEl.innerHTML = '';
+        apiGet('/api/roots').then(function (data) {
+            var roots = data.roots || [];
+            roots.forEach(function (root) {
+                var btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'task-btn';
+                btn.textContent = root;
+                btn.addEventListener('click', function () { loadBrowserPath(root); });
+                rootsEl.appendChild(btn);
+            });
+            refreshFocusable();
+        }).catch(function () { /* roots are a shortcut; listing still works */ });
+    }
+    function loadBrowserPath(path) {
+        var listEl = document.getElementById('browser-list');
+        var pathEl = document.getElementById('browser-path');
+        browserPickedFile = null;
+        setModalError('browser-error', '');
+        listEl.innerHTML = '<div class="empty-state"><span class="spinner"></span>Loading...</div>';
+        apiGet('/api/list', { path: path }).then(function (data) {
+            browserPath = data.path || path;
+            pathEl.textContent = browserPath;
+            pathEl.title = browserPath;
+            listEl.innerHTML = '';
+            var entries = (data.entries || []).slice().sort(function (a, b) {
+                if ((a.type === 'd') !== (b.type === 'd')) return a.type === 'd' ? -1 : 1;
+                return String(a.name).localeCompare(String(b.name));
+            });
+            if (browserPath !== '/') {
+                var up = document.createElement('button');
+                up.type = 'button';
+                up.className = 'browser-item';
+                up.innerHTML = '<span class="browser-icon">..</span><span class="browser-name">Parent directory</span>';
+                up.addEventListener('click', function () {
+                    var parent = browserPath.replace(/\/+$/, '').split('/').slice(0, -1).join('/') || '/';
+                    loadBrowserPath(parent);
+                });
+                listEl.appendChild(up);
+            }
+            if (!entries.length) {
+                var empty = document.createElement('div');
+                empty.className = 'empty-state';
+                empty.textContent = 'Folder is empty';
+                listEl.appendChild(empty);
+            }
+            entries.forEach(function (entry) {
+                var isDir = entry.type === 'd';
+                if (!isDir && browserMode !== 'archive') return;
+                if (!isDir && browserMode === 'archive' && !isArchiveName(entry.name)) return;
+                var item = document.createElement('button');
+                item.type = 'button';
+                item.className = 'browser-item';
+                var icon = isDir ? 'DIR' : 'FILE';
+                var row = document.createElement('span');
+                row.className = 'browser-icon';
+                row.textContent = icon;
+                var name = document.createElement('span');
+                name.className = 'browser-name';
+                name.textContent = entry.name;
+                name.title = entry.path;
+                item.appendChild(row);
+                item.appendChild(name);
+                if (!isDir) {
+                    var size = document.createElement('span');
+                    size.className = 'browser-size';
+                    size.textContent = formatBytes(entry.size);
+                    item.appendChild(size);
+                }
+                item.addEventListener('click', function () {
+                    if (isDir) {
+                        loadBrowserPath(entry.path);
+                    } else {
+                        var prev = listEl.querySelector('.browser-item.selected');
+                        if (prev) prev.classList.remove('selected');
+                        item.classList.add('selected');
+                        browserPickedFile = entry.path;
+                    }
+                });
+                listEl.appendChild(item);
+            });
+            refreshFocusable();
+        }).catch(function (err) {
+            listEl.innerHTML = '';
+            setModalError('browser-error', err.message);
+        });
+    }
+    document.getElementById('browser-cancel').addEventListener('click', function () {
+        closeModal('browser-modal');
+    });
+    document.getElementById('browser-select').addEventListener('click', function () {
+        if (browserMode === 'archive' && !browserPickedFile) {
+            setModalError('browser-error', 'Select an archive file first.');
+            return;
+        }
+        var picked = browserMode === 'archive' ? browserPickedFile : browserPath;
+        closeModal('browser-modal');
+        if (browserOnPick) browserOnPick(picked);
+    });
+
+    /* ---- url download modal (POST /api/url-download) ---- */
+    function defaultFilenameForUrl(url) {
+        var clean = String(url || '').split(/[?#]/, 1)[0];
+        var candidate = clean.slice(clean.lastIndexOf('/') + 1);
+        if (!candidate || candidate.length > 255 || /[\\/]/.test(candidate)) return 'download.bin';
+        try {
+            var decoded = decodeURIComponent(candidate);
+            return decoded && !/[\\/]/.test(decoded) ? decoded : 'download.bin';
+        } catch (e) {
+            return 'download.bin';
+        }
+    }
+    function openUrlModal() {
+        setModalError('url-error', '');
+        var dest = document.getElementById('url-dest');
+        if (!dest.value) dest.value = '/';
+        openModal('url-modal');
+    }
+    document.getElementById('btn-url').addEventListener('click', openUrlModal);
+    document.getElementById('url-cancel').addEventListener('click', function () { closeModal('url-modal'); });
+    document.getElementById('url-browse').addEventListener('click', function () {
+        var current = document.getElementById('url-dest').value || '/';
+        openBrowser('dir', current, function (picked) {
+            document.getElementById('url-dest').value = picked;
+        });
+    });
+    document.getElementById('url-input').addEventListener('change', function () {
+        var nameEl = document.getElementById('url-name');
+        if (!nameEl.value) nameEl.value = defaultFilenameForUrl(this.value.trim());
+    });
+    document.getElementById('url-submit').addEventListener('click', function () {
+        if (this.disabled) return;
+        var url = document.getElementById('url-input').value.trim();
+        var destination = document.getElementById('url-dest').value.trim();
+        var name = document.getElementById('url-name').value.trim();
+        if (!/^https?:\/\//i.test(url)) {
+            setModalError('url-error', 'Enter an http:// or https:// URL.');
+            return;
+        }
+        if (!destination) {
+            setModalError('url-error', 'Choose a destination folder.');
+            return;
+        }
+        if (!name || /[\\/]/.test(name)) {
+            setModalError('url-error', 'Enter a filename without path separators.');
+            return;
+        }
+        setModalError('url-error', '');
+        setSubmitting(this, true);
+        apiPost('/api/url-download', { url: url, destination: destination, name: name })
+            .then(function (data) {
+                setSubmitting(document.getElementById('url-submit'), false, 'Start Download');
+                closeModal('url-modal');
+                showToast('Download started (task ' + data.task_id + ')', 'success');
+                pollTasks();
+            })
+            .catch(function (err) {
+                setSubmitting(document.getElementById('url-submit'), false, 'Start Download');
+                setModalError('url-error', err.message);
+            });
+    });
+
+    /* ---- extract modal (POST /api/extract) ---- */
+    function defaultOutputForArchive(archivePath) {
+        var base = basename(archivePath) || 'archive';
+        return base.replace(/\.7z\.001$/i, '').replace(/\.(rar|r[0-9][0-9]|7z)$/i, '') + '-extracted';
+    }
+    function openExtractModal() {
+        setModalError('extract-error', '');
+        var dest = document.getElementById('extract-dest');
+        if (!dest.value) dest.value = '/';
+        openModal('extract-modal');
+    }
+    document.getElementById('btn-extract').addEventListener('click', openExtractModal);
+    document.getElementById('extract-cancel').addEventListener('click', function () { closeModal('extract-modal'); });
+    document.getElementById('extract-browse-source').addEventListener('click', function () {
+        openBrowser('archive', '/', function (picked) {
+            document.getElementById('extract-source').value = picked;
+            var nameEl = document.getElementById('extract-name');
+            if (!nameEl.value) nameEl.value = defaultOutputForArchive(picked);
+        });
+    });
+    document.getElementById('extract-browse-dest').addEventListener('click', function () {
+        var current = document.getElementById('extract-dest').value || '/';
+        openBrowser('dir', current, function (picked) {
+            document.getElementById('extract-dest').value = picked;
+        });
+    });
+    document.getElementById('extract-submit').addEventListener('click', function () {
+        if (this.disabled) return;
+        var source = document.getElementById('extract-source').value.trim();
+        var destination = document.getElementById('extract-dest').value.trim();
+        var name = document.getElementById('extract-name').value.trim();
+        var password = document.getElementById('extract-password').value;
+        var workers = document.getElementById('extract-workers').value;
+        if (!source) {
+            setModalError('extract-error', 'Select an archive file first.');
+            return;
+        }
+        if (!destination) {
+            setModalError('extract-error', 'Choose a destination folder.');
+            return;
+        }
+        if (!name || /[\\/]/.test(name) || name === '.' || name === '..') {
+            setModalError('extract-error', 'Enter an output folder name without path separators.');
+            return;
+        }
+        setModalError('extract-error', '');
+        setSubmitting(this, true);
+        apiPost('/api/extract', { source: source, destination: destination, name: name, password: password, workers: workers })
+            .then(function (data) {
+                setSubmitting(document.getElementById('extract-submit'), false, 'Start Extraction');
+                document.getElementById('extract-password').value = '';
+                closeModal('extract-modal');
+                showToast('Extraction started (task ' + data.task_id + ')', 'success');
+                pollTasks();
+            })
+            .catch(function (err) {
+                setSubmitting(document.getElementById('extract-submit'), false, 'Start Extraction');
+                setModalError('extract-error', err.message);
+            });
+    });
+
+    /* ---- quick actions ---- */
+    document.getElementById('btn-manager').addEventListener('click', function () { navigate('/fs'); });
+    document.getElementById('btn-convert').addEventListener('click', function () { navigate('/fs?convert=1'); });
+    var cards = document.querySelectorAll('.card');
+    for (var ci = 0; ci < cards.length; ci++) {
+        (function (card) {
+            card.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    var btn = card.querySelector('.btn');
+                    if (btn && document.activeElement === card) {
+                        e.preventDefault();
+                        btn.click();
+                    }
+                }
+            });
+        })(cards[ci]);
+    }
+
+    /* ---- task polling (GET /api/tasks) ---- */
+    function calculateProgress(task) {
+        if (!task.total) return 0;
+        return Math.min(100, Math.round((task.done / task.total) * 100));
+    }
+    function statusClass(state) {
+        if (state === 'running') return 'status-running';
+        if (state === 'queued') return 'status-queued';
+        if (state === 'paused') return 'status-paused';
+        if (state === 'done') return 'status-done';
+        if (state === 'failed') return 'status-failed';
+        if (state === 'canceled') return 'status-canceled';
+        return '';
+    }
+    function taskControl(id, label, danger, handler) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'task-btn' + (danger ? ' danger' : '');
+        btn.textContent = label;
+        btn.setAttribute('data-task', String(id));
+        btn.addEventListener('click', function () {
+            btn.disabled = true;
+            var original = label;
+            btn.textContent = '...';
+            handler().then(function () {
+                pollTasks();
+            }).catch(function (err) {
+                btn.disabled = false;
+                btn.textContent = original;
+                showToast(err.message, 'error');
+            });
+        });
+        return btn;
+    }
+    function renderTasks(tasks) {
+        /* Polling rebuilds this list every 2s.  Remember which control had
+         * focus so D-pad navigation is not dropped on every refresh. */
+        var focusedTask = null;
+        var focusedLabel = null;
+        if (document.activeElement && taskListEl.contains(document.activeElement)) {
+            focusedTask = document.activeElement.getAttribute('data-task');
+            focusedLabel = document.activeElement.textContent;
+        }
+        taskListEl.innerHTML = '';
+        if (!tasks || !tasks.length) {
+            var empty = document.createElement('div');
+            empty.className = 'empty-state';
+            empty.textContent = 'No active jobs. The system is idle.';
+            taskListEl.appendChild(empty);
+            refreshFocusable();
+            return;
+        }
+        tasks.forEach(function (task) {
+            var progress = calculateProgress(task);
+            var item = document.createElement('div');
+            item.className = 'task-item';
+
+            var info = document.createElement('div');
+            info.className = 'task-info';
+            var title = document.createElement('h4');
+            title.textContent = opLabel(task.op) + ': ' + (basename(task.src) || 'Processing...');
+            title.title = task.src || '';
+            var target = document.createElement('p');
+            target.textContent = 'Target: ' + (task.dst || task.current || 'N/A');
+            target.title = task.dst || task.current || '';
+            info.appendChild(title);
+            info.appendChild(target);
+            if (task.error) {
+                var errLine = document.createElement('p');
+                errLine.className = 'task-error';
+                errLine.textContent = task.error_code ? task.error + ' (' + task.error_code + ')' : task.error;
+                info.appendChild(errLine);
+            } else if (task.current && task.current !== task.src) {
+                var cur = document.createElement('p');
+                cur.textContent = task.current;
+                cur.title = task.current;
+                info.appendChild(cur);
+            }
+            var meta = document.createElement('div');
+            meta.className = 'task-meta';
+            var metaParts = [];
+            if (task.total) metaParts.push(formatBytes(task.done) + ' / ' + formatBytes(task.total));
+            if (task.speed) metaParts.push(formatBytes(task.speed) + '/s');
+            if (task.state === 'running' && task.total) metaParts.push('ETA ' + formatEta(task.eta));
+            if (task.cancel_requested) metaParts.push('canceling...');
+            meta.textContent = metaParts.join('  |  ');
+            if (metaParts.length) info.appendChild(meta);
+
+            var right = document.createElement('div');
+            right.className = 'progress-container';
+            var bar = document.createElement('div');
+            bar.className = 'progress-bar';
+            var fill = document.createElement('div');
+            fill.className = 'progress-fill';
+            fill.style.width = progress + '%';
+            bar.appendChild(fill);
+            var badge = document.createElement('span');
+            badge.className = 'status-badge ' + statusClass(task.state);
+            badge.textContent = String(task.state || '').toUpperCase() + ' (' + progress + '%)';
+            right.appendChild(bar);
+            right.appendChild(badge);
+
+            var controls = document.createElement('div');
+            controls.className = 'task-controls';
+            if (task.op === 'url_download' && task.state === 'running') {
+                controls.appendChild(taskControl(task.id, 'Pause', false, function () {
+                    return apiPost('/api/download/pause', { id: task.id });
+                }));
+            }
+            if (task.op === 'url_download' && task.state === 'paused') {
+                controls.appendChild(taskControl(task.id, 'Resume', false, function () {
+                    return apiPost('/api/download/resume', { id: task.id });
+                }));
+            }
+            if (task.op === 'url_download' && task.state === 'failed') {
+                controls.appendChild(taskControl(task.id, 'Retry', false, function () {
+                    return apiPost('/api/download/retry', { id: task.id });
+                }));
+            }
+            if (task.state === 'queued' || task.state === 'running' || task.state === 'paused' || task.state === 'failed') {
+                controls.appendChild(taskControl(task.id, 'Cancel', true, function () {
+                    return apiPost('/api/cancel', { id: task.id });
+                }));
+            }
+            if (controls.children.length) right.appendChild(controls);
+
+            item.appendChild(info);
+            item.appendChild(right);
+            taskListEl.appendChild(item);
+        });
+        refreshFocusable();
+        /* Restore focus to the same task control (exact label first, then
+         * any control for the task if its label changed mid-action). */
+        if (focusedTask) {
+            var controls = taskListEl.querySelectorAll('button');
+            var fallback = null;
+            for (var i = 0; i < controls.length; i++) {
+                if (controls[i].getAttribute('data-task') !== focusedTask) continue;
+                if (!fallback) fallback = controls[i];
+                if (controls[i].textContent === focusedLabel) { fallback = controls[i]; break; }
+            }
+            if (fallback) fallback.focus();
+        }
+    }
+    var pollSeq = 0;
+    function pollTasks() {
+        /* Overlapping polls can resolve out of order on a slow link; only
+         * the newest response may touch the DOM. */
+        var seq = ++pollSeq;
+        return apiGet('/api/tasks').then(function (data) {
+            if (seq !== pollSeq) return;
+            pollFailures = 0;
+            setStatus(true, false);
+            renderTasks(data.tasks);
+        }).catch(function (err) {
+            if (seq !== pollSeq) return;
+            pollFailures++;
+            setStatus(pollFailures < 3, pollFailures >= 1);
+            if (pollFailures === 1) {
+                taskListEl.innerHTML = '';
+                var empty = document.createElement('div');
+                empty.className = 'empty-state';
+                empty.textContent = 'Task polling failed: ' + err.message;
+                taskListEl.appendChild(empty);
+                refreshFocusable();
+            }
+        });
+    }
+
+    /* ---- d-pad / keyboard navigation ----
+     * The focusable set is recomputed after every render so arrow keys and
+     * focus rings track tasks and modal controls as they appear. */
+    var focusable = [];
+    function refreshFocusable() {
+        var inModal = modalVisible();
+        var selector = inModal
+            ? '.modal-overlay:not([hidden]) input, .modal-overlay:not([hidden]) select, .modal-overlay:not([hidden]) button'
+            : '.card, .btn, .task-btn';
+        var scope = inModal ? document : document.querySelector('.container');
+        var nodes = (scope || document).querySelectorAll(selector);
+        focusable = [];
+        for (var i = 0; i < nodes.length; i++) {
+            if (!nodes[i].disabled && nodes[i].offsetParent !== null) focusable.push(nodes[i]);
+        }
+    }
+    document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && modalVisible()) {
+            /* The browser sits on top of the url/extract modals. */
+            var overlays = ['browser-modal', 'url-modal', 'extract-modal'];
+            for (var i = 0; i < overlays.length; i++) {
+                if (!document.getElementById(overlays[i]).hidden) {
+                    closeModal(overlays[i]);
+                    break;
+                }
+            }
+            return;
+        }
+        if (e.key !== 'ArrowRight' && e.key !== 'ArrowDown' && e.key !== 'ArrowLeft' && e.key !== 'ArrowUp') return;
+        var tag = (e.target && e.target.tagName) || '';
+        if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+        refreshFocusable();
+        var index = focusable.indexOf(document.activeElement);
+        if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+            if (index < focusable.length - 1) {
+                e.preventDefault();
+                focusable[index + 1].focus();
+            } else if (index === -1 && focusable.length) {
+                e.preventDefault();
+                focusable[0].focus();
+            }
+        } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+            if (index > 0) {
+                e.preventDefault();
+                focusable[index - 1].focus();
+            }
+        }
+    });
+
+    refreshFocusable();
     pollTasks();
     setInterval(pollTasks, 2000);
-    document.addEventListener('keydown', (e) => {
-        const focusable = Array.from(document.querySelectorAll('.card, .btn'));
-        const current = document.activeElement;
-        let index = focusable.indexOf(current);
-        if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { if (index < focusable.length - 1) focusable[index + 1].focus(); }
-        else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { if (index > 0) focusable[index - 1].focus(); }
-    });
+})();
 </script>
 </body>
 </html>

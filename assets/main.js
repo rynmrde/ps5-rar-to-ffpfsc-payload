@@ -36,7 +36,7 @@ let uploadXhr = null;
 let uploadTerminalAbort = false;
 let L = {};
 
-const APP_VERSION = "v0.4.2";
+const APP_VERSION = "v0.4.7";
 const LAST_PATH_KEY = "ps5-web-file-mgr:last-path";
 const SORT_KEY = "ps5-web-file-mgr:list-sort";
 const LOADING_DISPLAY_DELAY = 250;
@@ -77,6 +77,7 @@ const uploadFilesEl = document.getElementById("uploadFiles");
 const uploadFolderEl = document.getElementById("uploadFolder");
 const initLoadingEl = document.getElementById("initLoading");
 const exitBtn = document.getElementById("exitBtn");
+const launcherBtn = document.getElementById("launcherBtn");
 const textEditorOverlayEl = document.getElementById("textEditorOverlay");
 const textEditorPathEl = document.getElementById("textEditorPath");
 const textEditorEl = document.getElementById("textEditor");
@@ -170,6 +171,10 @@ function applyStaticText() {
   }
   exitBtn.title = t("exit");
   exitBtn.setAttribute("aria-label", t("exit"));
+  if (launcherBtn) {
+    launcherBtn.title = t("launcher");
+    launcherBtn.setAttribute("aria-label", t("launcher"));
+  }
   parentBtn.title = t("parent");
   parentBtn.setAttribute("aria-label", t("parent"));
   versionEl.textContent = APP_VERSION;
@@ -1325,6 +1330,7 @@ function updateButtons() {
   selectAllEl.disabled = locked;
   parentBtn.disabled = locked || cwd === "/";
   exitBtn.disabled = locked;
+  if (launcherBtn) launcherBtn.disabled = locked;
   selectAllEl.checked = entries.length > 0 && items.length === entries.length;
   selectAllEl.indeterminate = items.length > 0 && items.length < entries.length;
   renderInstallPkgButton(items, locked);
@@ -2300,6 +2306,22 @@ function actionExit() {
   });
 }
 
+function actionLauncher() {
+  if (busy || loadingPath) return;
+  window.location.href = "/" + window.location.hash;
+}
+
+function handleLaunchParams() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("convert") === "1") {
+      setStatus(t("convertHint"));
+      if (convertBtn) convertBtn.focus();
+    }
+  } catch (err) {
+  }
+}
+
 document.getElementById("refreshBtn").addEventListener("click", () => load(cwd, false));
 
 function isExtractableArchive(item) {
@@ -2410,6 +2432,7 @@ uploadFolderBtn.addEventListener("click", actionUploadFolder);
 uploadFilesEl.addEventListener("change", () => uploadFiles(uploadFilesEl.files));
 uploadFolderEl.addEventListener("change", () => uploadFiles(uploadFolderEl.files));
 exitBtn.addEventListener("click", actionExit);
+if (launcherBtn) launcherBtn.addEventListener("click", actionLauncher);
 parentBtn.addEventListener("click", actionParentDirectory);
 textEditorCloseBtn.addEventListener("click", requestCloseTextEditor);
 textEditorSaveBtn.addEventListener("click", saveTextEditor);
@@ -2609,6 +2632,7 @@ async function init() {
   } else if (savedPath !== "/" && await load("/", undefined, false, false)) {
     seedHistoryPath(cwd);
   }
+  handleLaunchParams();
 }
 
 init();
