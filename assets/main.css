@@ -113,6 +113,33 @@ body {
   min-width: 0;
 }
 
+.launcher-button {
+  flex: 0 0 auto;
+  margin-left: 12px;
+  padding: 8px 16px;
+  border: 1px solid #2d5fa4;
+  border-radius: 8px;
+  background: rgba(0, 111, 205, .25);
+  color: #edf5ff;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.launcher-button:hover,
+.launcher-button:focus {
+  background: rgba(0, 111, 205, .5);
+  box-shadow: 0 0 12px rgba(0, 111, 205, .4);
+  outline: none;
+}
+
+.launcher-button:disabled {
+  opacity: .45;
+  cursor: default;
+  box-shadow: none;
+}
+
 .space-info {
   height: auto;
   min-height: 0;

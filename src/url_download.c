@@ -166,15 +166,35 @@ write_download_journal(const file_task_t *task) {
   journal.checksum = download_journal_checksum(&journal);
   fd = mkstemp(temporary);
   if(fd < 0 || !(f = fdopen(fd, "wb"))) {
-    if(fd >= 0) close(fd);
+    if(fd >= 0) {
+      close(fd);
+      unlink(temporary);
+    }
     return -1;
   }
-  if(fwrite(&journal, sizeof(journal), 1, f) != 1 || fflush(f) ||
-     fsync(fileno(f)) || fclose(f) || rename(temporary, task->download_journal)) {
-    int error = errno ? errno : EIO;
-    unlink(temporary);
-    errno = error;
-    return -1;
+  /* Never chain fclose() inside a short-circuit || expression: an early
+   * failure would skip fclose() and leak the FILE * plus its descriptor
+   * on every retry of a long-running download.  Always close exactly once. */
+  {
+    int journal_error = 0;
+    if(fwrite(&journal, sizeof(journal), 1, f) != 1) {
+      journal_error = errno ? errno : EIO;
+    } else if(fflush(f)) {
+      journal_error = errno ? errno : EIO;
+    } else if(fsync(fileno(f))) {
+      journal_error = errno ? errno : EIO;
+    }
+    if(fclose(f)) {
+      if(!journal_error) journal_error = errno ? errno : EIO;
+    }
+    if(!journal_error && rename(temporary, task->download_journal)) {
+      journal_error = errno ? errno : EIO;
+    }
+    if(journal_error) {
+      unlink(temporary);
+      errno = journal_error;
+      return -1;
+    }
   }
   return 0;
 }
@@ -234,6 +254,31 @@ url_task_total(file_task_t *task, unsigned long long total) {
   pthread_mutex_lock(&g_tasks_lock);
   task->total = total;
   task->updated_at = time(NULL);
+  pthread_mutex_unlock(&g_tasks_lock);
+}
+
+/* task->done and task->download_checkpoint_done are owned by g_tasks_lock
+ * (task_update mutates them under that mutex while /api/tasks serializes
+ * them).  The transfer loops must therefore snapshot and publish the
+ * checkpoint through the same mutex instead of touching the fields
+ * directly; otherwise a concurrent poller races the worker. */
+static int
+url_download_checkpoint_needed(file_task_t *task) {
+  unsigned long long done;
+  unsigned long long checkpoint;
+
+  pthread_mutex_lock(&g_tasks_lock);
+  done = task->done;
+  checkpoint = task->download_checkpoint_done;
+  pthread_mutex_unlock(&g_tasks_lock);
+  return done >= checkpoint &&
+         done - checkpoint >= URL_DOWNLOAD_CHECKPOINT_BYTES;
+}
+
+static void
+url_download_checkpoint_mark(file_task_t *task) {
+  pthread_mutex_lock(&g_tasks_lock);
+  task->download_checkpoint_done = task->done;
   pthread_mutex_unlock(&g_tasks_lock);
 }
 
@@ -454,8 +499,15 @@ host_http_open(const char *text, const remote_url_t *url,
     if(headers_end) {
       char *line_end;
       char *line;
+      char *status_line_end;
       size_t header_bytes = (size_t)(headers_end + 4 - client->pending);
-      if(sscanf(client->pending, "HTTP/%*u.%*u %d", &status) != 1 ||
+      /* The status line is bounded by the 8 KiB header buffer.  Reject
+       * anything that is not an explicit HTTP/1.x 2xx response before the
+       * sscanf conversion so a crafted banner cannot smuggle a status. */
+      status_line_end = strstr(client->pending, "\r\n");
+      if(!status_line_end || status_line_end > headers_end ||
+         strncmp(client->pending, "HTTP/", 5) ||
+         sscanf(client->pending, "HTTP/%*u.%*u %d", &status) != 1 ||
          status < 200 || status >= 300 ||
          (resume_at && status != 206 && status != 200) ||
          (!resume_at && status != 200)) {
@@ -465,19 +517,29 @@ host_http_open(const char *text, const remote_url_t *url,
         return -1;
       }
       client->status_code = status;
-      line = strstr(client->pending, "\r\n");
+      line = status_line_end;
       while(line && line < headers_end) {
         char *value;
         line += 2;
         line_end = strstr(line, "\r\n");
         if(!line_end || line_end > headers_end) break;
-        value = strchr(line, ':');
+        if(line_end == line) break; /* Defensive: never spin on empty line. */
+        value = memchr(line, ':', (size_t)(line_end - line));
         if(value && (size_t)(value - line) == 14 &&
            !strncasecmp(line, "Content-Length", 14)) {
           char *endp;
           unsigned long long length;
           value++;
-          while(value < line_end && isspace((unsigned char)*value)) value++;
+          while(value < line_end && (*value == ' ' || *value == '\t')) value++;
+          /* strtoull() accepts a leading sign and whitespace; an explicit
+           * unsigned digit run is required here. */
+          if(value >= line_end || *value == '+' || *value == '-' ||
+             !isdigit((unsigned char)*value)) {
+            snprintf(error, error_size, "invalid Content-Length");
+            errno = EPROTO;
+            host_http_close(client);
+            return -1;
+          }
           errno = 0;
           length = strtoull(value, &endp, 10);
           if(errno || endp == value || endp != line_end) {
@@ -486,21 +548,37 @@ host_http_open(const char *text, const remote_url_t *url,
             host_http_close(client);
             return -1;
           }
+          /* Conflicting duplicate framing headers must fail closed rather
+           * than letting the last occurrence win silently. */
+          if(saw_length && client->content_length != length) {
+            snprintf(error, error_size, "conflicting Content-Length");
+            errno = EPROTO;
+            host_http_close(client);
+            return -1;
+          }
           client->content_length = length;
           saw_length = 1;
+        } else if(value && (size_t)(value - line) == 17 &&
+                  !strncasecmp(line, "Transfer-Encoding", 17)) {
+          /* The host regression client has no chunked decoder; any
+           * Transfer-Encoding framing is rejected case-insensitively. */
+          snprintf(error, error_size, "chunked HTTP responses are not supported by host tests");
+          errno = ENOTSUP;
+          host_http_close(client);
+          return -1;
         }
         line = line_end;
-      }
-      if(strstr(client->pending, "Transfer-Encoding:") ||
-         strstr(client->pending, "transfer-encoding:")) {
-        snprintf(error, error_size, "chunked HTTP responses are not supported by host tests");
-        errno = ENOTSUP;
-        host_http_close(client);
-        return -1;
       }
       client->pending_offset = header_bytes;
       client->pending_size = used;
       client->body_remaining = saw_length ? client->content_length : ULLONG_MAX;
+      if(saw_length && status == 206 &&
+         ULLONG_MAX - client->content_length < resume_at) {
+        snprintf(error, error_size, "invalid Content-Length");
+        errno = EPROTO;
+        host_http_close(client);
+        return -1;
+      }
       *content_length = saw_length ? client->content_length +
         (status == 206 ? resume_at : 0) : 0;
       return 0;
@@ -706,8 +784,11 @@ url_download_task_run(file_task_t *task) {
       goto sce_done;
     }
     if(status_code == 200 && resume_at) {
+      /* Server ignored Range: truncate to a fresh download.  sce_done
+       * releases the SceHttp template/connection/request handles and the
+       * shared done: label below closes the output fd exactly once. */
       if(ftruncate(fd, 0) || lseek(fd, 0, SEEK_SET) < 0) {
-        result = errno;
+        result = errno ? errno : EIO;
         goto sce_done;
       }
       resume_at = 0;
@@ -722,6 +803,11 @@ url_download_task_run(file_task_t *task) {
     }
     if(sceHttpGetResponseContentLength(request_id, &content_length) == 0 &&
        content_length != ULLONG_MAX) {
+      if(ULLONG_MAX - content_length < resume_at) {
+        snprintf(error, sizeof(error), "invalid Content-Length");
+        result = EIO;
+        goto sce_done;
+      }
       url_task_total(task, content_length + resume_at);
     } else {
       content_length = 0;
@@ -753,12 +839,12 @@ url_download_task_run(file_task_t *task) {
         }
       }
       task_update(task, TASK_RUNNING, task->src, (unsigned long long)got, NULL);
-      if(task->done - task->download_checkpoint_done >= URL_DOWNLOAD_CHECKPOINT_BYTES) {
+      if(url_download_checkpoint_needed(task)) {
         if(write_download_journal(task)) {
           result = errno ? errno : EIO;
           goto sce_done;
         }
-        task->download_checkpoint_done = task->done;
+        url_download_checkpoint_mark(task);
       }
     }
     if(task_cancel_requested(task)) result = ECANCELED;
@@ -782,8 +868,14 @@ sce_done:
       goto done;
     }
     if(client.status_code == 200 && resume_at) {
+      /* The server ignored Range: truncate to a fresh download and reset
+       * the journal.  The HTTP socket must be released on every reset
+       * failure path; otherwise each 200-on-resume retry leaks one
+       * descriptor for the life of the payload.  The output fd is owned
+       * by the shared done: label below. */
       if(ftruncate(fd, 0) || lseek(fd, 0, SEEK_SET) < 0) {
-        result = errno;
+        result = errno ? errno : EIO;
+        host_http_close(&client);
         goto done;
       }
       resume_at = 0;
@@ -793,6 +885,7 @@ sce_done:
       pthread_mutex_unlock(&g_tasks_lock);
       if(write_download_journal(task)) {
         result = errno ? errno : EIO;
+        host_http_close(&client);
         goto done;
       }
     }
@@ -811,13 +904,13 @@ sce_done:
         offset += (size_t)wrote;
       }
       task_update(task, TASK_RUNNING, task->src, (unsigned long long)got, NULL);
-      if(task->done - task->download_checkpoint_done >= URL_DOWNLOAD_CHECKPOINT_BYTES) {
+      if(url_download_checkpoint_needed(task)) {
         if(write_download_journal(task)) {
           result = errno ? errno : EIO;
           host_http_close(&client);
           goto done;
         }
-        task->download_checkpoint_done = task->done;
+        url_download_checkpoint_mark(task);
       }
     }
     if(task_cancel_requested(task)) {
@@ -880,14 +973,21 @@ read_download_journal(const char *path, url_download_journal_t *journal) {
   if(!path || !journal || lstat(path, &st) || !S_ISREG(st.st_mode) ||
      st.st_nlink != 1 || (size_t)st.st_size != sizeof(*journal) ||
      !(f = fopen(path, "rb"))) return -1;
-  if(fread(journal, sizeof(*journal), 1, f) != 1 || fclose(f) ||
-     journal->magic != URL_DOWNLOAD_JOURNAL_MAGIC ||
-     journal->version != URL_DOWNLOAD_JOURNAL_VERSION ||
-     journal->checksum != download_journal_checksum(journal) ||
-     !memchr(journal->source, 0, sizeof(journal->source)) ||
-     !memchr(journal->destination, 0, sizeof(journal->destination)) ||
-     !memchr(journal->temporary, 0, sizeof(journal->temporary))) {
-    return -1;
+  /* fclose() must run exactly once: chaining it inside || would skip the
+   * close when fread() fails and leak the descriptor on every corrupt
+   * journal encountered during the startup recovery scan. */
+  {
+    size_t got = fread(journal, sizeof(*journal), 1, f);
+    int close_error = fclose(f);
+    if(got != 1 || close_error ||
+       journal->magic != URL_DOWNLOAD_JOURNAL_MAGIC ||
+       journal->version != URL_DOWNLOAD_JOURNAL_VERSION ||
+       journal->checksum != download_journal_checksum(journal) ||
+       !memchr(journal->source, 0, sizeof(journal->source)) ||
+       !memchr(journal->destination, 0, sizeof(journal->destination)) ||
+       !memchr(journal->temporary, 0, sizeof(journal->temporary))) {
+      return -1;
+    }
   }
   return 0;
 }
