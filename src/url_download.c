@@ -282,6 +282,24 @@ url_download_checkpoint_mark(file_task_t *task) {
   pthread_mutex_unlock(&g_tasks_lock);
 }
 
+/* Must be called with g_tasks_lock held.  Resets the byte counters and the
+ * speed/ETA sampler together: lowering task->done while leaving a stale
+ * speed_sample_done behind would wrap the unsigned delta in task_update()
+ * and report a bogus multi-exabyte/s spike on the next progress update. */
+static void
+url_download_reset_progress_locked(file_task_t *task,
+                                   unsigned long long done) {
+  task->done = done;
+  task->download_checkpoint_done = done;
+  task->speed = 0;
+  task->eta = 0;
+  task->speed_sample_done = done;
+  task->speed_sample_time.tv_sec = 0;
+  task->speed_sample_time.tv_nsec = 0;
+  task->eta_sample_next = 0;
+  task->eta_sample_count = 0;
+}
+
 static int
 url_has_control_characters(const char *text) {
   const unsigned char *p = (const unsigned char *)text;
@@ -716,7 +734,7 @@ url_download_task_run(file_task_t *task) {
   }
   if(resume_at) {
     pthread_mutex_lock(&g_tasks_lock);
-    if(task->done != resume_at) task->done = resume_at;
+    url_download_reset_progress_locked(task, resume_at);
     pthread_mutex_unlock(&g_tasks_lock);
   }
   if(write_download_journal(task)) {
@@ -793,8 +811,7 @@ url_download_task_run(file_task_t *task) {
       }
       resume_at = 0;
       pthread_mutex_lock(&g_tasks_lock);
-      task->done = 0;
-      task->download_checkpoint_done = 0;
+      url_download_reset_progress_locked(task, 0);
       pthread_mutex_unlock(&g_tasks_lock);
       if(write_download_journal(task)) {
         result = errno ? errno : EIO;
@@ -880,8 +897,7 @@ sce_done:
       }
       resume_at = 0;
       pthread_mutex_lock(&g_tasks_lock);
-      task->done = 0;
-      task->download_checkpoint_done = 0;
+      url_download_reset_progress_locked(task, 0);
       pthread_mutex_unlock(&g_tasks_lock);
       if(write_download_journal(task)) {
         result = errno ? errno : EIO;

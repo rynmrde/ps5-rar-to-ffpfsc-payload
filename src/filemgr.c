@@ -2538,6 +2538,8 @@ task_worker(void *arg) {
        snprintf(staging, sizeof(staging), "%s/.mkpfs-extract-%lu.tmp", parent,
                 task->id) >= (int)sizeof(staging)) {
       ret = EINVAL;
+      snprintf(archive_error, sizeof(archive_error),
+               "invalid extraction destination");
     } else {
       struct stat staging_st;
       /* Task ids restart at 1 on every payload launch, so a run killed
@@ -2547,17 +2549,23 @@ task_worker(void *arg) {
       if(!lstat(staging, &staging_st)) {
         if(remove_staging_tree(staging) || mkdir(staging, 0700)) {
           ret = errno ? errno : EIO;
+          snprintf(archive_error, sizeof(archive_error),
+                   "cannot prepare extraction staging: %s", strerror(ret));
         } else {
           stage_ready = 1;
         }
       } else if(errno == ENOENT) {
         if(mkdir(staging, 0700)) {
           ret = errno ? errno : EIO;
+          snprintf(archive_error, sizeof(archive_error),
+                   "cannot prepare extraction staging: %s", strerror(ret));
         } else {
           stage_ready = 1;
         }
       } else {
         ret = errno ? errno : EIO;
+        snprintf(archive_error, sizeof(archive_error),
+                 "cannot prepare extraction staging: %s", strerror(ret));
       }
     }
     if(stage_ready) {
@@ -2582,12 +2590,16 @@ task_worker(void *arg) {
                    "extraction destination already exists");
         } else if(errno != ENOENT) {
           ret = errno ? errno : EIO;
+          snprintf(archive_error, sizeof(archive_error),
+                   "cannot access extraction destination: %s", strerror(ret));
         } else if(verify_extract_staging_tree(staging, verify_reason,
                                               sizeof(verify_reason))) {
           ret = errno ? errno : EIO;
           snprintf(archive_error, sizeof(archive_error), "%s", verify_reason);
         } else if(rename(staging, task->dst)) {
           ret = errno ? errno : EIO;
+          snprintf(archive_error, sizeof(archive_error),
+                   "cannot publish extraction output: %s", strerror(ret));
         } else if(sync_directory_path(parent)) {
           /* The rename is atomic but not yet durable.  Match the
            * downloader's publish semantics and report the failure. */
@@ -2605,13 +2617,17 @@ task_worker(void *arg) {
                                          strerror(cleanup_errno));
         }
       }
-      if(ret != 0 && archive_error[0]) {
-        task_set_error_code(task,
-                            strcasestr(archive_error, "password") ?
-                            "archive_password" : "archive_extract_failed",
-                            task->srcs[0]);
-        task_update(task, TASK_RUNNING, task->srcs[0], 0, archive_error);
-      }
+    }
+    /* Recorded outside the stage_ready gate so staging-setup failures
+     * report their cause too.  task->error carries the message to the
+     * final TASK_FAILED transition; a bare errno would be clobbered by
+     * the tool-exit-code mapping below. */
+    if(ret != 0 && archive_error[0]) {
+      task_set_error_code(task,
+                          strcasestr(archive_error, "password") ?
+                          "archive_password" : "archive_extract_failed",
+                          task->srcs[0]);
+      task_update(task, TASK_RUNNING, task->srcs[0], 0, archive_error);
     }
     if(task_cancel_requested(task) && ret == 0) ret = ECANCELED;
     if(ret == 255) {

@@ -307,7 +307,9 @@ write_owned_binary(const char *path, const uint8_t *data, size_t size) {
 /* Reads a regular file into a freshly allocated buffer.  Returns 0 with
  * *data_out set on success, 1 when the file does not exist (first install),
  * and -1 on any other error.  Symlinks, hardlinks, and oversized files are
- * refused so a tampered title directory fails closed. */
+ * refused so a tampered title directory fails closed.  The descriptor is
+ * opened with O_NOFOLLOW and validated with fstat() so a path swapped for
+ * a symlink between the check and the read cannot be followed. */
 static int
 read_backup_file(const char *path, void **data_out, size_t *size_out,
                  size_t max_size) {
@@ -316,19 +318,29 @@ read_backup_file(const char *path, void **data_out, size_t *size_out,
   void *buffer;
   size_t got;
   int close_error;
+  int fd;
 
   *data_out = NULL;
   *size_out = 0;
-  if(lstat(path, &st)) {
+  fd = open(path, O_RDONLY | O_NOFOLLOW);
+  if(fd < 0) {
     return errno == ENOENT ? 1 : -1;
+  }
+  if(fstat(fd, &st)) {
+    close(fd);
+    return -1;
   }
   if(!S_ISREG(st.st_mode) || st.st_nlink != 1 || st.st_size < 0 ||
      (uintmax_t)st.st_size > (uintmax_t)max_size) {
+    close(fd);
     errno = EINVAL;
     return -1;
   }
-  f = fopen(path, "rb");
-  if(!f) return -1;
+  f = fdopen(fd, "rb");
+  if(!f) {
+    close(fd);
+    return -1;
+  }
   buffer = malloc((size_t)st.st_size ? (size_t)st.st_size : 1);
   if(!buffer) {
     fclose(f);
@@ -347,8 +359,10 @@ read_backup_file(const char *path, void **data_out, size_t *size_out,
 }
 
 /* Proves the staged file on disk is exactly the expected content.  The
- * lstat() gate refuses symlinks and hardlinks; the size check runs before
- * any byte is read so a truncated stage cannot compare equal. */
+ * descriptor is opened with O_NOFOLLOW and pinned with fstat() so the
+ * check and the read cannot be split by a swapped path; the size check
+ * runs before any byte is read so a truncated stage cannot compare
+ * equal. */
 static int
 verify_launcher_file(const char *path, const void *expected,
                      size_t expected_size) {
@@ -356,17 +370,29 @@ verify_launcher_file(const char *path, const void *expected,
   FILE *f;
   uint8_t buffer[4096];
   size_t offset = 0;
+  int fd;
 
   if(!path || (!expected && expected_size)) {
     errno = EINVAL;
     return -1;
   }
-  if(lstat(path, &st) || !S_ISREG(st.st_mode) || st.st_nlink != 1 ||
-     st.st_size < 0 || (size_t)st.st_size != expected_size) {
+  fd = open(path, O_RDONLY | O_NOFOLLOW);
+  if(fd < 0) return -1;
+  if(fstat(fd, &st)) {
+    close(fd);
     return -1;
   }
-  f = fopen(path, "rb");
-  if(!f) return -1;
+  if(!S_ISREG(st.st_mode) || st.st_nlink != 1 || st.st_size < 0 ||
+     (size_t)st.st_size != expected_size) {
+    close(fd);
+    errno = EINVAL;
+    return -1;
+  }
+  f = fdopen(fd, "rb");
+  if(!f) {
+    close(fd);
+    return -1;
+  }
   while(offset < expected_size) {
     size_t chunk = expected_size - offset;
     size_t got;
@@ -565,6 +591,7 @@ app_install_if_needed(unsigned short port) {
                                      LAUNCHER_PARAM_BACKUP_MAX);
     if(backup_rc < 0) {
       perror("backup launcher param");
+      notify_user("MkPFS launcher backup failed; keeping the current Home Screen entry");
       return -1;
     }
     have_param_backup = backup_rc == 0;
@@ -575,6 +602,7 @@ app_install_if_needed(unsigned short port) {
                                      LAUNCHER_ICON_BACKUP_MAX);
     if(backup_rc < 0) {
       perror("backup launcher icon");
+      notify_user("MkPFS launcher backup failed; keeping the current Home Screen entry");
       free(backup_param);
       return -1;
     }

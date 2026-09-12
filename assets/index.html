@@ -222,7 +222,6 @@
     var toastEl = document.getElementById('toast');
     var toastTimer = 0;
     var pollFailures = 0;
-    var submitting = false;
 
     /* ---- auth (same convention as the file manager: #token=...) ---- */
     function getToken() {
@@ -340,7 +339,8 @@
         el.classList.toggle('visible', Boolean(message));
     }
     function setSubmitting(btn, active, label) {
-        submitting = active;
+        /* Double-submit protection lives on the button itself so one modal
+         * can never silently block the other. */
         btn.disabled = active;
         if (active) {
             btn.setAttribute('data-label', btn.textContent);
@@ -506,7 +506,7 @@
         if (!nameEl.value) nameEl.value = defaultFilenameForUrl(this.value.trim());
     });
     document.getElementById('url-submit').addEventListener('click', function () {
-        if (submitting) return;
+        if (this.disabled) return;
         var url = document.getElementById('url-input').value.trim();
         var destination = document.getElementById('url-dest').value.trim();
         var name = document.getElementById('url-name').value.trim();
@@ -564,7 +564,7 @@
         });
     });
     document.getElementById('extract-submit').addEventListener('click', function () {
-        if (submitting) return;
+        if (this.disabled) return;
         var source = document.getElementById('extract-source').value.trim();
         var destination = document.getElementById('extract-dest').value.trim();
         var name = document.getElementById('extract-name').value.trim();
@@ -651,6 +651,14 @@
         return btn;
     }
     function renderTasks(tasks) {
+        /* Polling rebuilds this list every 2s.  Remember which control had
+         * focus so D-pad navigation is not dropped on every refresh. */
+        var focusedTask = null;
+        var focusedLabel = null;
+        if (document.activeElement && taskListEl.contains(document.activeElement)) {
+            focusedTask = document.activeElement.getAttribute('data-task');
+            focusedLabel = document.activeElement.textContent;
+        }
         taskListEl.innerHTML = '';
         if (!tasks || !tasks.length) {
             var empty = document.createElement('div');
@@ -739,13 +747,31 @@
             taskListEl.appendChild(item);
         });
         refreshFocusable();
+        /* Restore focus to the same task control (exact label first, then
+         * any control for the task if its label changed mid-action). */
+        if (focusedTask) {
+            var controls = taskListEl.querySelectorAll('button');
+            var fallback = null;
+            for (var i = 0; i < controls.length; i++) {
+                if (controls[i].getAttribute('data-task') !== focusedTask) continue;
+                if (!fallback) fallback = controls[i];
+                if (controls[i].textContent === focusedLabel) { fallback = controls[i]; break; }
+            }
+            if (fallback) fallback.focus();
+        }
     }
+    var pollSeq = 0;
     function pollTasks() {
+        /* Overlapping polls can resolve out of order on a slow link; only
+         * the newest response may touch the DOM. */
+        var seq = ++pollSeq;
         return apiGet('/api/tasks').then(function (data) {
+            if (seq !== pollSeq) return;
             pollFailures = 0;
             setStatus(true, false);
             renderTasks(data.tasks);
         }).catch(function (err) {
+            if (seq !== pollSeq) return;
             pollFailures++;
             setStatus(pollFailures < 3, pollFailures >= 1);
             if (pollFailures === 1) {
