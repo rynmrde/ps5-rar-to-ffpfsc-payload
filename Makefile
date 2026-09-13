@@ -98,6 +98,7 @@ mkpfs-convert-folder: tools/mkpfs-convert-folder
 
 deps:
 	@$(PKG_CONFIG) --exists libmicrohttpd || ./install-libmicrohttpd.sh
+	@test -f $(PS5_PAYLOAD_SDK)/target/include/zlib.h -a -f $(PS5_PAYLOAD_SDK)/target/lib/libz.a || ./install-zlib.sh
 
 linux-deps:
 	@$(HOST_PKG_CONFIG) --exists libmicrohttpd || \

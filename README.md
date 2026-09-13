@@ -63,6 +63,12 @@ Root discovery keeps the standard PS5 locations and also enumerates actual direc
 
 Host-side regression tests and Linux builds are run in CI and during release preparation. Physical PS5 notification delivery, Home Screen refresh, firmware-specific mount visibility, and long-running hardware stability still require verification on a jailbroken PS5 with the target firmware.
 
+## Building from source
+
+On Ubuntu or Debian, install the host compiler, PS5 SDK compiler prerequisite, HTTP headers, and archive-fixture generators with `sudo apt-get install build-essential pkg-config libmicrohttpd-dev clang-18 lld-18 unzip rar 7zip`. Download the official PS5 Payload SDK archive, extract it to `/opt/ps5-payload-sdk`, and export `PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk`. The build automatically installs static `libmicrohttpd` and zlib into the SDK target sysroot when they are absent, so a clean SDK distribution can build the payload without application-source changes.
+
+Run `make all` for `rar-to-ffpfsc-ps5-payload.elf`, `make linux` for the host verification binary, and the individual `make test-*` targets for regression coverage. The archive test creates single-volume, multipart, password-protected RAR and 7z fixtures locally; it therefore requires both `rar` and `7z` in addition to the build toolchain.
+
 ## PS5 web UI and controller controls
 
 I kept the interface usable from the PS5 browser while preserving the phone and desktop experience. You can browse, choose sources and destinations, convert folders, extract archives, download URLs, review errors, manage outputs, and follow job history from the same UI.

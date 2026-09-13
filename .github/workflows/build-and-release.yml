@@ -42,7 +42,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libmicrohttpd-dev
+          sudo apt-get install -y build-essential pkg-config libmicrohttpd-dev \
+            clang-18 lld-18 unzip rar 7zip
 
       - name: Download PS5 Payload SDK
         run: |
@@ -81,7 +82,7 @@ jobs:
 
       - name: Generate checksums
         run: |
-          sha256sum rar-to-ffpfsc-ps5-payload.elf > "SHA256SUMS-${{ steps.version.outputs.version }}.txt"
+          sha256sum rar-to-ffpfsc-ps5-payload.elf web-file-mgr-linux > "SHA256SUMS-${{ steps.version.outputs.version }}.txt"
           cat "SHA256SUMS-${{ steps.version.outputs.version }}.txt"
 
       - name: Upload artifacts
@@ -103,6 +104,7 @@ jobs:
           prerelease: false
           files: |
             rar-to-ffpfsc-ps5-payload.elf
+            web-file-mgr-linux
             SHA256SUMS-${{ steps.version.outputs.version }}.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
