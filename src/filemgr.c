@@ -1530,10 +1530,20 @@ remove_path(file_task_t *task, const char *path) {
 /* Archive output is written only inside a unique, task-owned staging
  * directory.  This cleanup deliberately uses lstat, so an archive-supplied
  * symlink is unlinked rather than followed, even after cancellation. */
+/* Maximum directory nesting accepted while walking archive staging trees.
+ * Every recursion level holds a PATH_MAX buffer on the worker thread stack,
+ * so depth is capped the same way mkpfs caps its own tree scans: anything
+ * deeper fails closed with ELOOP instead of overflowing the stack. */
+#define STAGING_TREE_MAX_DEPTH 128u
+
 static int
-remove_staging_tree(const char *path) {
+remove_staging_tree_depth(const char *path, unsigned int depth) {
   struct stat st;
 
+  if(depth > STAGING_TREE_MAX_DEPTH) {
+    errno = ELOOP;
+    return -1;
+  }
   if(lstat(path, &st)) {
     return errno == ENOENT ? 0 : -1;
   }
@@ -1546,7 +1556,7 @@ remove_staging_tree(const char *path) {
       char child[PATH_MAX];
       if(!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
       if(path_join(child, sizeof(child), path, entry->d_name) ||
-         remove_staging_tree(child)) {
+         remove_staging_tree_depth(child, depth + 1)) {
         ret = -1;
         break;
       }
@@ -1558,6 +1568,11 @@ remove_staging_tree(const char *path) {
   return unlink(path);
 }
 
+static int
+remove_staging_tree(const char *path) {
+  return remove_staging_tree_depth(path, 0);
+}
+
 /* Upper bound for the post-extraction verification walk.  A legitimate
  * game archive never approaches one million members; anything beyond that
  * fails closed instead of stalling the worker. */
@@ -1565,10 +1580,16 @@ remove_staging_tree(const char *path) {
 
 static int
 verify_extract_tree_entries(const char *path, unsigned long *count,
+                            unsigned int depth,
                             char *reason, size_t reason_size) {
   DIR *dir;
   struct dirent *entry;
 
+  if(depth > STAGING_TREE_MAX_DEPTH) {
+    snprintf(reason, reason_size, "archive nesting is too deep");
+    errno = ELOOP;
+    return -1;
+  }
   dir = opendir(path);
   if(!dir) {
     snprintf(reason, reason_size, "cannot inspect extracted output");
@@ -1610,7 +1631,7 @@ verify_extract_tree_entries(const char *path, unsigned long *count,
       return -1;
     }
     if(S_ISDIR(st.st_mode)) {
-      if(verify_extract_tree_entries(child, count, reason, reason_size)) {
+      if(verify_extract_tree_entries(child, count, depth + 1, reason, reason_size)) {
         closedir(dir);
         return -1;
       }
@@ -1654,7 +1675,7 @@ verify_extract_staging_tree(const char *staging, char *reason,
     errno = ENOTDIR;
     return -1;
   }
-  return verify_extract_tree_entries(staging, &count, reason, reason_size);
+  return verify_extract_tree_entries(staging, &count, 0, reason, reason_size);
 }
 
 static int
@@ -3110,7 +3131,7 @@ api_convert(struct MHD_Connection *conn) {
   strbuf_printf(&b, "{\"ok\":true,\"task_id\":%lu}", task->id);
   free(destination); free(name); free(profile); free(workers_param); return send_buffer(conn, MHD_HTTP_OK, b.data, "application/json");
 convert_error:
-  free(source); free(destination); free(name); free(profile); free(workers_param); free(srcs); if (task) { free(task->srcs); free(task); }
+  free(source); free(destination); free(name); free(profile); free(workers_param); free(srcs); free_task(task);
   return send_json_error(conn, rc,
                          rc == MHD_HTTP_CONFLICT ?
                          "destination exists or another task is running" :
@@ -3194,10 +3215,9 @@ api_extract(struct MHD_Connection *conn) {
 extract_error:
   free(source); free(destination); free(name); free(password); free(workers_param);
   free(srcs);
-  if(task) {
-    free(task->srcs);
-    free(task);
-  }
+  /* free_task() releases the transferred srcs[0] string too; freeing only
+   * the array here would leak it on the busy-conflict path. */
+  free_task(task);
   return send_json_error(conn, rc,
     rc == MHD_HTTP_INSUFFICIENT_STORAGE ? "insufficient storage" :
     rc == MHD_HTTP_CONFLICT ? "destination exists or another task is running" :
