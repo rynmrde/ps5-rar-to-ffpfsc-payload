@@ -240,8 +240,9 @@
     }
 
     /* ---- ui helpers ----
-     * All dynamic strings are rendered through textContent, never innerHTML,
-     * so archive/task paths cannot inject markup into the launcher. */
+     * All dynamic strings are rendered through textContent; innerHTML appears
+     * only with static template literals, so archive/task paths cannot inject
+     * markup into the launcher. */
     function showToast(message, kind) {
         toastEl.textContent = message;
         toastEl.className = 'visible ' + (kind || '');

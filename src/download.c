@@ -59,8 +59,11 @@ static enum MHD_Result
 download_task_request_error(struct MHD_Connection *conn, file_task_t *task,
                             char **paths, size_t count, unsigned int status,
                             const char *msg) {
+  /* The path list is released exactly once through the parameter.  Using
+   * free_task() here would free it a second time via task->srcs on the
+   * paths already linked to the task (busy-conflict path). */
   free_paths(paths, count);
-  free_task(task);
+  free(task);
   return send_json_error(conn, status, msg);
 }
 
