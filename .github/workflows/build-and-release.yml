@@ -1,0 +1,108 @@
+name: Build PS5 ELF and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v0.4.8)'
+        required: true
+        default: 'v0.4.8'
+
+env:
+  PS5_PAYLOAD_SDK: /opt/ps5-payload-sdk
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME}"
+          fi
+          if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]; then
+            echo "Invalid release version: $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libmicrohttpd-dev
+
+      - name: Download PS5 Payload SDK
+        run: |
+          wget -q https://github.com/ps5-payload-dev/sdk/releases/latest/download/ps5-payload-sdk.zip
+          unzip -q ps5-payload-sdk.zip
+          sudo mv ps5-payload-sdk /opt/
+          test -f "$PS5_PAYLOAD_SDK/toolchain/prospero.mk"
+
+      - name: Build archive library
+        run: make archive-lib
+
+      - name: Build PS5 ELF
+        run: make all
+
+      - name: Build Linux binary
+        run: make linux
+
+      - name: Run tests
+        run: |
+          make test-native
+          make test-resume
+          make test-conversion-recovery
+          make test-exfat-recovery
+          make test-exfat-source-change
+          make test-archive
+          make test-url-download
+          make test-url-download-recovery
+          make test-default-port
+
+      - name: Verify build outputs
+        run: |
+          test -s rar-to-ffpfsc-ps5-payload.elf
+          test -s web-file-mgr-linux
+          file rar-to-ffpfsc-ps5-payload.elf
+          file web-file-mgr-linux
+
+      - name: Generate checksums
+        run: |
+          sha256sum rar-to-ffpfsc-ps5-payload.elf > "SHA256SUMS-${{ steps.version.outputs.version }}.txt"
+          cat "SHA256SUMS-${{ steps.version.outputs.version }}.txt"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ps5-elf-and-checksums
+          path: |
+            rar-to-ffpfsc-ps5-payload.elf
+            web-file-mgr-linux
+            SHA256SUMS-*.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: MkPFS-PS5 ${{ steps.version.outputs.version }} - UI Completion & Critical Fixes
+          body_path: RELEASE_NOTES_${{ steps.version.outputs.version }}.md
+          draft: false
+          prerelease: false
+          files: |
+            rar-to-ffpfsc-ps5-payload.elf
+            SHA256SUMS-${{ steps.version.outputs.version }}.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
